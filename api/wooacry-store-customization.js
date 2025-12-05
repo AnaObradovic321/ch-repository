@@ -1,5 +1,4 @@
 // api/wooacry-store-customization.js
-import crypto from "crypto";
 
 const SHOPIFY_DOMAIN = "characterhub-merch-store.myshopify.com";
 
@@ -7,6 +6,7 @@ export default async function handler(req, res) {
   try {
     const { customize_no, variant_id } = req.query;
 
+    // Validate required params
     if (!customize_no) {
       return res.status(400).json({ error: "Missing customize_no" });
     }
@@ -15,9 +15,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing variant_id" });
     }
 
-    // 1. Fetch Wooacry customization details
+    // 1. Fetch Wooacry customization details (via our proxy)
     const infoResponse = await fetch(
-      `https://ch-repository.vercel.app/api/wooacry-customize-info`,
+      "https://ch-repository.vercel.app/api/wooacry-customize-info",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -27,7 +27,7 @@ export default async function handler(req, res) {
 
     const info = await infoResponse.json();
 
-    if (!info.data) {
+    if (!info || !info.data) {
       return res.status(500).json({
         error: "Failed retrieving customize info",
         details: info
@@ -35,52 +35,50 @@ export default async function handler(req, res) {
     }
 
     const sku = info.data.sku;
-    const renderImages = info.data.render_images || [];
+    const mockups = info.data.render_images || [];
 
-    // 2. Prepare Shopify cart payload
+    // 2. Build the correct Shopify cart payload
     const payload = {
       items: [
         {
-          id: variant_id,   // ✔ CORRECT: Shopify variant ID
+          id: Number(variant_id),   // MUST be Shopify variant ID
           quantity: 1,
           properties: {
-            customize_no: customize_no,
-            custom_mockup: renderImages[0] || "",
-            custom_spu: info.data.spu.name,
-            custom_sku_name: sku.name
+            customize_no,
+            custom_mockup: mockups[0] || "",
+            custom_spu: info.data.spu?.name || "",
+            custom_sku_name: sku?.name || ""
           }
         }
       ]
     };
 
-    // 3. POST to Shopify cart/add.js
+    // 3. Send item into Shopify cart
     const cartResponse = await fetch(
       `https://${SHOPIFY_DOMAIN}/cart/add.js`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       }
     );
 
     if (!cartResponse.ok) {
       const errText = await cartResponse.text();
-      console.error("Shopify error:", errText);
-      return res.status(500).json({ error: "Shopify rejected item", details: errText });
+      console.error("Shopify rejected cart item:", errText);
+      return res.status(500).json({
+        error: "Shopify cart/add.js rejected item",
+        details: errText
+      });
     }
 
-    // 4. Redirect user to Shopify cart page
-    return res.redirect(
-      302,
-      `https://${SHOPIFY_DOMAIN}/cart`
-    );
+    // 4. Redirect user into Shopify cart page
+    return res.redirect(302, `https://${SHOPIFY_DOMAIN}/cart`);
 
   } catch (err) {
-    console.error("store-customization error:", err);
+    console.error("store-customization ERROR:", err);
     return res.status(500).json({
-      error: "Server error",
+      error: "Server failure in store-customization",
       details: err.message
     });
   }
