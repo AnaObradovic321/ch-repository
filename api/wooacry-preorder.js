@@ -1,3 +1,4 @@
+// api/wooacry-preorder.js
 import { buildHeaders } from "./wooacry-utils.js";
 
 export default async function handler(req, res) {
@@ -6,23 +7,26 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { customize_no, count, address, third_party_user } = req.body;
+    const { skus, address, third_party_user } = req.body;
 
-    if (!customize_no || !count || !address) {
+    // Validate skus[] array
+    if (!skus || !Array.isArray(skus) || skus.length === 0) {
       return res.status(400).json({
-        error: "Missing required fields: customize_no, count, address"
+        error: "Missing or invalid skus array"
       });
     }
 
+    if (!address) {
+      return res.status(400).json({
+        error: "Missing address"
+      });
+    }
+
+    // Build Wooacry preorder body EXACTLY per API
     const body = {
       third_party_user: third_party_user || "characterhub_user",
-      skus: [
-        {
-          customize_no,
-          count
-        }
-      ],
-      address
+      skus,      // ← ✔ Direct pass-through
+      address    // ← ✔ Matches API schema
     };
 
     const wooacryResponse = await fetch(
