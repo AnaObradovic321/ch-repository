@@ -1,3 +1,4 @@
+// api/wooacry-order-create.js
 import { buildHeaders } from "./wooacry-utils.js";
 
 export default async function handler(req, res) {
@@ -15,23 +16,43 @@ export default async function handler(req, res) {
       address
     } = req.body;
 
-    if (!third_party_order_sn || !shipping_method_id || !skus || !address) {
+    // Validate required fields
+    if (
+      !third_party_order_sn ||
+      !third_party_order_created_at ||
+      !third_party_user ||
+      !shipping_method_id ||
+      !skus ||
+      !Array.isArray(skus) ||
+      skus.length === 0 ||
+      !address
+    ) {
       return res.status(400).json({
-        error:
-          "Missing required fields: third_party_order_sn, shipping_method_id, skus, address"
+        error: "Missing required fields for Wooacry order-create"
       });
     }
 
+    // Transform Shopify address → Wooacry address
+    const wooacryAddress = {
+      first_name: address.first_name,
+      last_name: address.last_name,
+      phone: address.phone,
+      province: address.province,
+      city: address.city,
+      post_code: address.post_code,
+      address1: address.address1,
+      address2: address.address2 || "",
+      country_cdoe: address.country_code, // Wooacry API uses typo "country_cdoe"
+      tax_number: address.tax_number || "" // fallback — accepts empty for non-required countries
+    };
+
     const body = {
       third_party_order_sn,
-      third_party_order_created_at:
-        third_party_order_created_at || Math.floor(Date.now() / 1000),
-      third_party_user: third_party_user || "characterhub_user",
+      third_party_order_created_at,
+      third_party_user,
       shipping_method_id,
-
       skus,
-
-      address
+      address: wooacryAddress
     };
 
     const wooacryResponse = await fetch(
