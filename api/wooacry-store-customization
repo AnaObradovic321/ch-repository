@@ -1,4 +1,7 @@
+// api/wooacry-store-customization.js
 import crypto from "crypto";
+
+const SHOPIFY_DOMAIN = "characterhub-merch-store.myshopify.com";
 
 export default async function handler(req, res) {
   try {
@@ -8,9 +11,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing customize_no" });
     }
 
-    // 1. Fetch full customization info from your existing API
+    // 1. Fetch Wooacry customization details
     const infoResponse = await fetch(
-      `${process.env.VERCEL_URL}/api/wooacry-customize-info`,
+      `https://ch-repository.vercel.app/api/wooacry-customize-info`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -22,35 +25,59 @@ export default async function handler(req, res) {
 
     if (!info.data) {
       return res.status(500).json({
-        error: "Failed to retrieve Wooacry customization info",
+        error: "Failed retrieving customize info",
         details: info
       });
     }
 
-    const customization = {
-      customize_no,
-      sku_id: info.data.sku.id,
-      sku_name: info.data.sku.name,
-      price: info.data.sku.sale_price,
-      package_price: info.data.sku.package_price,
-      render_images: info.data.render_images,
-      spu_name: info.data.spu.name
+    const sku = info.data.sku;
+    const renderImages = info.data.render_images || [];
+
+    // 2. Prepare Shopify cart payload
+    const payload = {
+      items: [
+        {
+          id: sku.id,              // Shopify variant ID (must match!)
+          quantity: 1,
+          properties: {
+            customize_no: customize_no,
+            custom_mockup: renderImages[0] || "",
+            custom_spu: info.data.spu.name,
+            custom_sku_name: sku.name
+          }
+        }
+      ]
     };
 
-    // 2. Store temporarily in encrypted cookie
-    const cookiePayload = Buffer.from(JSON.stringify(customization)).toString(
-      "base64"
+    // 3. POST to Shopify cart/add.js
+    const cartResponse = await fetch(
+      `https://${SHOPIFY_DOMAIN}/cart/add.js`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      }
     );
 
-    res.setHeader("Set-Cookie", `wooacry_custom=${cookiePayload}; Path=/; HttpOnly; Secure; SameSite=Lax`);
+    if (!cartResponse.ok) {
+      const errText = await cartResponse.text();
+      console.error("Shopify error:", errText);
+      return res.status(500).json({ error: "Shopify rejected item", details: errText });
+    }
 
-    // 3. Redirect user → Shopify "Add to cart" endpoint
-    const redirectUrl = `/cart/add?items[0][id]=${customization.sku_id}&items[0][quantity]=1`;
-
-    return res.redirect(302, redirectUrl);
+    // 4. Redirect user to Shopify cart page
+    return res.redirect(
+      302,
+      `https://${SHOPIFY_DOMAIN}/cart`
+    );
 
   } catch (err) {
     console.error("store-customization error:", err);
-    return res.status(500).json({ error: "Server error", details: err.message });
+    return res.status(500).json({
+      error: "Server error",
+      details: err.message
+    });
   }
 }
