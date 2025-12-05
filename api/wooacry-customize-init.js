@@ -25,15 +25,20 @@ export default async function handler(req, res) {
     const third_party_user = "guest"; // temporary
     const third_party_spu = product_id;
 
-    // Build Shopify callback URL
-    const rawCallback = `${CALLBACK_BASE}?product_id=${product_id}&variant_id=${variant_id}`;
+    // FIXED CALLBACK: Wooacry will append ?customize_no itself
+    const rawCallback = CALLBACK_BASE;
     const redirect_url = encodeURIComponent(rawCallback);
 
     // Build signature EXACTLY per documentation
-    const sigString = `reseller_flag=${RESELLER_FLAG}&timestamp=${timestamp}&third_party_user=${third_party_user}&secret=${SECRET}`;
+    const sigString =
+      `reseller_flag=${RESELLER_FLAG}` +
+      `&timestamp=${timestamp}` +
+      `&third_party_user=${third_party_user}` +
+      `&secret=${SECRET}`;
+
     const sign = crypto.createHash("md5").update(sigString).digest("hex");
 
-    // FINAL URL (the ONLY correct redirect URL)
+    // FINAL URL
     const finalURL =
       `${REDIRECT_API}?reseller_flag=${RESELLER_FLAG}` +
       `&timestamp=${timestamp}` +
@@ -44,11 +49,10 @@ export default async function handler(req, res) {
 
     console.log("Correct Redirect URL:", finalURL);
 
-    // Redirect user to Wooacry API, not the editor
     return res.redirect(302, finalURL);
+
   } catch (err) {
     console.error("customize-init error:", err);
     return res.status(500).json({ error: "Server error" });
   }
 }
-// force deploy test
