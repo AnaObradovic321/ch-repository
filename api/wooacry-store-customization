@@ -1,0 +1,56 @@
+import crypto from "crypto";
+
+export default async function handler(req, res) {
+  try {
+    const { customize_no } = req.query;
+
+    if (!customize_no) {
+      return res.status(400).json({ error: "Missing customize_no" });
+    }
+
+    // 1. Fetch full customization info from your existing API
+    const infoResponse = await fetch(
+      `${process.env.VERCEL_URL}/api/wooacry-customize-info`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customize_no })
+      }
+    );
+
+    const info = await infoResponse.json();
+
+    if (!info.data) {
+      return res.status(500).json({
+        error: "Failed to retrieve Wooacry customization info",
+        details: info
+      });
+    }
+
+    const customization = {
+      customize_no,
+      sku_id: info.data.sku.id,
+      sku_name: info.data.sku.name,
+      price: info.data.sku.sale_price,
+      package_price: info.data.sku.package_price,
+      render_images: info.data.render_images,
+      spu_name: info.data.spu.name
+    };
+
+    // 2. Store temporarily in encrypted cookie
+    const cookiePayload = Buffer.from(JSON.stringify(customization)).toString(
+      "base64"
+    );
+
+    res.setHeader("Set-Cookie", `wooacry_custom=${cookiePayload}; Path=/; HttpOnly; Secure; SameSite=Lax`);
+
+    // 3. Redirect user → Shopify "Add to cart" endpoint
+    const redirectUrl = `/cart/add?items[0][id]=${customization.sku_id}&items[0][quantity]=1`;
+
+    return res.redirect(302, redirectUrl);
+
+  } catch (err) {
+    console.error("store-customization error:", err);
+    return res.status(500).json({ error: "Server error", details: err.message });
+  }
+}
