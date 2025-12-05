@@ -5,10 +5,14 @@ const SHOPIFY_DOMAIN = "characterhub-merch-store.myshopify.com";
 
 export default async function handler(req, res) {
   try {
-    const { customize_no } = req.query;
+    const { customize_no, variant_id } = req.query;
 
     if (!customize_no) {
       return res.status(400).json({ error: "Missing customize_no" });
+    }
+
+    if (!variant_id) {
+      return res.status(400).json({ error: "Missing variant_id" });
     }
 
     // 1. Fetch Wooacry customization details
@@ -37,7 +41,7 @@ export default async function handler(req, res) {
     const payload = {
       items: [
         {
-          id: sku.id,              // Shopify variant ID (must match!)
+          id: variant_id,   // ✔ CORRECT: Shopify variant ID
           quantity: 1,
           properties: {
             customize_no: customize_no,
