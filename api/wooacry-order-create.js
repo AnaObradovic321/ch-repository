@@ -42,7 +42,7 @@ export default async function handler(req, res) {
       post_code: address.post_code,
       address1: address.address1,
       address2: address.address2 || "",
-      country_cdoe: address.country_code, // Wooacry API uses typo "country_cdoe"
+      country_code: address.country_code, // Wooacry API uses typo "country_cdoe"
       tax_number: address.tax_number || "" // fallback — accepts empty for non-required countries
     };
 
