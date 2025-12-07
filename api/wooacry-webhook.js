@@ -5,5 +5,9 @@ export default async function handler(req, res) {
 
   // TODO: update Shopify tracking number here
 
-  return res.status(200).json({ success: true });
+  return res.status(200).json({
+    data: [],
+    code: 0,
+    message: "success"
+  });
 }
