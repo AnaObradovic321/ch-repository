@@ -8,11 +8,10 @@ export function generateTimestamp() {
   return Math.floor(Date.now() / 1000);
 }
 
-// JSON must be stable — ensures correct signature every time
-export function stableJSONStringify(obj) {
-  return JSON.stringify(obj, Object.keys(obj).sort());
-}
-
+/**
+ * Builds MD5 signature EXACTLY as Wooacry documentation requires.
+ * Uses the RAW JSON STRING (the exact body that will be sent).
+ */
 export function buildSignature(rawBodyString, timestamp) {
   const signatureString =
     WOOACRY_RESELLER_FLAG + "\n" +
@@ -24,6 +23,10 @@ export function buildSignature(rawBodyString, timestamp) {
   return crypto.createHash("md5").update(signatureString).digest("hex");
 }
 
+/**
+ * Builds request headers using the raw JSON string.
+ * This ensures the signature ALWAYS matches the actual outgoing request.
+ */
 export function buildHeaders(rawBodyString) {
   const timestamp = generateTimestamp();
   const sign = buildSignature(rawBodyString, timestamp);
