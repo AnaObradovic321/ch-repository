@@ -26,12 +26,12 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing required fields for Wooacry order-create" });
     }
 
-    // Order create requires *country_cdoe* (their typo but enforced)
+    // Order create requires *country_cdoe* )
     const wooacryAddress = {
       first_name: address.first_name,
       last_name: address.last_name,
       phone: address.phone,
-      country_cdoe: address.country_code,
+      country_code: address.country_code,
       province: address.province,
       city: address.city,
       address1: address.address1,
