@@ -33,18 +33,18 @@ export default async function handler(req, res) {
     }
 
     // Transform Shopify address → Wooacry address
-    const wooacryAddress = {
-      first_name: address.first_name,
-      last_name: address.last_name,
-      phone: address.phone,
-      province: address.province,
-      city: address.city,
-      post_code: address.post_code,
-      address1: address.address1,
-      address2: address.address2 || "",
-      country_code: address.country_code, // Wooacry API uses typo "country_cdoe"
-      tax_number: address.tax_number || "" // fallback — accepts empty for non-required countries
-    };
+const wooacryAddress = {
+  first_name: address.first_name,
+  last_name: address.last_name,
+  phone: address.phone,
+  country_code: address.country_code,
+  province: address.province,
+  city: address.city,
+  address1: address.address1,
+  address2: address.address2 || "",
+  post_code: address.post_code,
+  tax_number: address.tax_number || ""
+};
 
     const body = {
       third_party_order_sn,
