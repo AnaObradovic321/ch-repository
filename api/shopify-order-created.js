@@ -65,8 +65,9 @@ export default async function handler(req, res) {
 };
 
 const preorderResponse = await createPreorder(preorderRequest);
-    const shipping_method_id =
-      preorderResponse?.data?.shipping_methods?.[0]?.id;
+const shipping_method_id =
+  preorderResponse?.data?.data?.shipping_methods?.[0]?.id;
+
 
     if (!shipping_method_id) {
       console.error("Wooacry returned no shipping method.");
