@@ -53,36 +53,33 @@ export default async function handler(req, res) {
     const singleSKU = skus[0];
 
     // STEP 2: Preorder
- const preorderRequest = {
+// Wooacry supports multi-SKU orders
+const preorderRequest = {
   third_party_user,
-  skus: [
-    {
-      customize_no: singleSKU.customize_no,
-      count: singleSKU.count
-    }
-  ],
+  skus,
   address: baseAddress
 };
 
 const preorderResponse = await createPreorder(preorderRequest);
+
 const shipping_method_id =
   preorderResponse?.data?.data?.shipping_methods?.[0]?.id;
 
+if (!shipping_method_id) {
+  console.error("Wooacry returned no shipping method.");
+  return res.status(500).json({ error: "No shipping from Wooacry" });
+}
 
-    if (!shipping_method_id) {
-      console.error("Wooacry returned no shipping method.");
-      return res.status(500).json({ error: "No shipping from Wooacry" });
-    }
-
-    // STEP 3: Final Wooacry Order
-    const createOrderRequest = {
-      third_party_order_sn,
-      third_party_order_created_at,
-      third_party_user,
-      shipping_method_id,
-      skus: [singleSKU],
-      address: baseAddress
-    };
+// Final Wooacry Order
+const createOrderRequest = {
+  third_party_order_sn,
+  third_party_order_created_at,
+  third_party_user,
+  shipping_method_id,
+  skus,
+  address: baseAddress
+};
+    
 
     const orderCreateResponse = await createOrder(createOrderRequest);
 
