@@ -2,7 +2,6 @@ import crypto from "crypto";
 
 const RESELLER_FLAG = "characterhub";
 const SECRET = "3710d71b1608f78948a60602c4a6d9d8";
-
 const API_URL =
   "https://api-new.wooacry.com/api/reseller/web/editor/redirect";
 
@@ -21,24 +20,26 @@ export default async function handler(req, res) {
     const third_party_spu = product_id;
 
     const redirect_url =
-      `https://characterhub-merch-store.myshopify.com/pages/wooacry-callback`
-      + `?product_id=${product_id}`
-      + `&variant_id=${variant_id}`;
+      `https://characterhub-merch-store.myshopify.com/pages/wooacry-callback` +
+      `?product_id=${product_id}` +
+      `&variant_id=${variant_id}`;
 
-    // Correct signature: 4-line signature, no body
+    // Wooacry requires an empty body "{}" in signature even when no body is sent.
+    const EMPTY_BODY = "{}";
+
     const sigString =
-      `${RESELLER_FLAG}\n${timestamp}\n${version}\n${SECRET}\n`;
+      `${RESELLER_FLAG}\n${timestamp}\n${version}\n${EMPTY_BODY}\n${SECRET}\n`;
 
     const sign = crypto.createHash("md5").update(sigString).digest("hex");
 
     const finalUrl =
-      `${API_URL}?reseller_flag=${RESELLER_FLAG}`
-      + `&timestamp=${timestamp}`
-      + `&version=${version}`
-      + `&third_party_user=${encodeURIComponent(third_party_user)}`
-      + `&third_party_spu=${encodeURIComponent(third_party_spu)}`
-      + `&redirect_url=${encodeURIComponent(redirect_url)}`
-      + `&sign=${sign}`;
+      `${API_URL}?reseller_flag=${RESELLER_FLAG}` +
+      `&timestamp=${timestamp}` +
+      `&version=${version}` +
+      `&third_party_user=${encodeURIComponent(third_party_user)}` +
+      `&third_party_spu=${encodeURIComponent(third_party_spu)}` +
+      `&redirect_url=${encodeURIComponent(redirect_url)}` +
+      `&sign=${sign}`;
 
     console.log("Wooacry Redirect Request:", finalUrl);
 
@@ -46,19 +47,16 @@ export default async function handler(req, res) {
 
     const contentType = wooacryResponse.headers.get("content-type") || "";
 
-    // CASE 1: Wooacry returns HTML (most common)
     if (contentType.includes("text/html")) {
       const html = await wooacryResponse.text();
       return res.status(200).send(html);
     }
 
-    // CASE 2: Wooacry returns 302 redirect
     if (wooacryResponse.status >= 300 && wooacryResponse.status < 400) {
       const location = wooacryResponse.headers.get("location");
       if (location) return res.redirect(302, location);
     }
 
-    // CASE 3: Wooacry returns JSON unexpectedly
     const text = await wooacryResponse.text();
     return res.status(200).send(text);
 
