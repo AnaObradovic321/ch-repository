@@ -53,15 +53,18 @@ export default async function handler(req, res) {
     const singleSKU = skus[0];
 
     // STEP 2: Preorder
-    const preorderRequest = {
-      third_party_user,
+ const preorderRequest = {
+  third_party_user,
+  skus: [
+    {
       customize_no: singleSKU.customize_no,
-      count: singleSKU.count,
-      address: baseAddress
-    };
+      count: singleSKU.count
+    }
+  ],
+  address: baseAddress
+};
 
-    const preorderResponse = await createPreorder(preorderRequest);
-
+const preorderResponse = await createPreorder(preorderRequest);
     const shipping_method_id =
       preorderResponse?.data?.shipping_methods?.[0]?.id;
 
