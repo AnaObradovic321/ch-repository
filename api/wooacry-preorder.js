@@ -7,29 +7,28 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { skus, address, third_party_user } = req.body;
+    const { third_party_user, skus, address } = req.body;
 
-    // Validate skus[] array
+    if (!third_party_user) {
+      return res.status(400).json({ error: "Missing third_party_user" });
+    }
+
     if (!skus || !Array.isArray(skus) || skus.length === 0) {
-      return res.status(400).json({
-        error: "Missing or invalid skus array"
-      });
+      return res.status(400).json({ error: "Invalid or missing skus[]" });
     }
 
     if (!address) {
-      return res.status(400).json({
-        error: "Missing address"
-      });
+      return res.status(400).json({ error: "Missing address" });
     }
 
-    // Build Wooacry preorder body EXACTLY per API
+    // EXACT Wooacry structure
     const body = {
-      third_party_user: third_party_user || "characterhub_user",
-      skus,      // ← ✔ Direct pass-through
-      address    // ← ✔ Matches API schema
+      third_party_user,
+      skus,
+      address
     };
 
-    const wooacryResponse = await fetch(
+    const response = await fetch(
       "https://api-new.wooacry.com/api/reseller/open/order/create/pre",
       {
         method: "POST",
@@ -38,13 +37,12 @@ export default async function handler(req, res) {
       }
     );
 
-    const result = await wooacryResponse.json();
-
-    console.log("Wooacry Preorder Response:", result);
+    const result = await response.json();
+    console.log("Wooacry Pre-order Response:", result);
 
     return res.status(200).json(result);
-  } catch (e) {
-    console.error("Preorder Error:", e);
-    return res.status(500).json({ error: e.message });
+  } catch (err) {
+    console.error("Preorder Error:", err);
+    return res.status(500).json({ error: err.message });
   }
 }
