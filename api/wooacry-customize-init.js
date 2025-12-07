@@ -2,9 +2,7 @@ import crypto from "crypto";
 
 const RESELLER_FLAG = "characterhub";
 const SECRET = "3710d71b1608f78948a60602c4a6d9d8";
-
-const REDIRECT_API =
-  "https://api-new.wooacry.com/api/reseller/open/web/editor/redirect";
+const API_URL = "https://api-new.wooacry.com/api/reseller/web/editor/redirect";
 
 export default async function handler(req, res) {
   try {
@@ -15,43 +13,43 @@ export default async function handler(req, res) {
     }
 
     const timestamp = Math.floor(Date.now() / 1000);
-    const third_party_user = "guest";
-    const third_party_spu = product_id;
+    const version = "1";
 
-    const callbackUrl =
-      `https://characterhub-merch-store.myshopify.com/pages/wooacry-callback?product_id=${product_id}&variant_id=${variant_id}`;
+    const body = {
+      third_party_user: "guest",
+      third_party_spu: product_id,
+      redirect_url: `https://characterhub-merch-store.myshopify.com/pages/wooacry-callback?product_id=${product_id}&variant_id=${variant_id}`
+    };
 
-    const redirect_url = encodeURIComponent(callbackUrl);
-
+    // EXACT signature required by documentation
     const sigString =
-      `reseller_flag=${RESELLER_FLAG}` +
-      `&timestamp=${timestamp}` +
-      `&third_party_user=${third_party_user}` +
-      `&secret=${SECRET}`;
+      `${RESELLER_FLAG}\n${timestamp}\n${version}\n${JSON.stringify(body)}\n${SECRET}\n`;
 
     const sign = crypto.createHash("md5").update(sigString).digest("hex");
 
-    // CALL Wooacry
-    const url =
-      `${REDIRECT_API}?reseller_flag=${RESELLER_FLAG}` +
-      `&timestamp=${timestamp}` +
-      `&redirect_url=${redirect_url}` +
-      `&third_party_spu=${third_party_spu}` +
-      `&third_party_user=${third_party_user}` +
-      `&sign=${sign}`;
+    const response = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Reseller-Flag": RESELLER_FLAG,
+        "Timestamp": String(timestamp),
+        "Version": version,
+        "Sign": sign
+      },
+      body: JSON.stringify(body)
+    });
 
-    const wooacryResp = await fetch(url);
-    const data = await wooacryResp.json();
+    const data = await response.json();
 
     if (!data?.data?.redirect_url) {
-      console.error("Wooacry redirect error:", data);
-      return res.status(500).json({ error: "Wooacry redirect failed", data });
+      console.error("Wooacry Error:", data);
+      return res.status(500).json({ error: "Wooacry redirect failed", details: data });
     }
 
     return res.redirect(302, data.data.redirect_url);
 
   } catch (err) {
-    console.error("Init error:", err);
+    console.error("Customize-Init ERROR:", err);
     return res.status(500).json({ error: err.message });
   }
 }
