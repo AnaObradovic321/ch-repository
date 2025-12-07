@@ -24,44 +24,10 @@ export default async function handler(req, res) {
       `?product_id=${product_id}` +
       `&variant_id=${variant_id}`;
 
-    // Wooacry requires an empty body "{}" in signature even when no body is sent.
-    const EMPTY_BODY = "{}";
+    // Correct Wooacry rule: BODY MUST BE EMPTY STRING for GET redirect API
+    const EMPTY_BODY = "";
 
     const sigString =
       `${RESELLER_FLAG}\n${timestamp}\n${version}\n${EMPTY_BODY}\n${SECRET}\n`;
 
-    const sign = crypto.createHash("md5").update(sigString).digest("hex");
-
-    const finalUrl =
-      `${API_URL}?reseller_flag=${RESELLER_FLAG}` +
-      `&timestamp=${timestamp}` +
-      `&version=${version}` +
-      `&third_party_user=${encodeURIComponent(third_party_user)}` +
-      `&third_party_spu=${encodeURIComponent(third_party_spu)}` +
-      `&redirect_url=${encodeURIComponent(redirect_url)}` +
-      `&sign=${sign}`;
-
-    console.log("Wooacry Redirect Request:", finalUrl);
-
-    const wooacryResponse = await fetch(finalUrl);
-
-    const contentType = wooacryResponse.headers.get("content-type") || "";
-
-    if (contentType.includes("text/html")) {
-      const html = await wooacryResponse.text();
-      return res.status(200).send(html);
-    }
-
-    if (wooacryResponse.status >= 300 && wooacryResponse.status < 400) {
-      const location = wooacryResponse.headers.get("location");
-      if (location) return res.redirect(302, location);
-    }
-
-    const text = await wooacryResponse.text();
-    return res.status(200).send(text);
-
-  } catch (err) {
-    console.error("Wooacry Init ERROR:", err);
-    return res.status(500).json({ error: err.message });
-  }
-}
+    const sign = crypto
