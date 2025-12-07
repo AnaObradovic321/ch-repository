@@ -13,27 +13,25 @@ export function stableJSONStringify(obj) {
   return JSON.stringify(obj, Object.keys(obj).sort());
 }
 
-export function buildSignature(body, timestamp) {
-  const bodyString = stableJSONStringify(body);
-
+export function buildSignature(rawBodyString, timestamp) {
   const signatureString =
     WOOACRY_RESELLER_FLAG + "\n" +
     timestamp + "\n" +
     WOOACRY_VERSION + "\n" +
-    bodyString + "\n" +
+    rawBodyString + "\n" +
     WOOACRY_SECRET + "\n";
 
   return crypto.createHash("md5").update(signatureString).digest("hex");
 }
 
-export function buildHeaders(body) {
+export function buildHeaders(rawBodyString) {
   const timestamp = generateTimestamp();
-  const sign = buildSignature(body, timestamp);
+  const sign = buildSignature(rawBodyString, timestamp);
 
   return {
     "Content-Type": "application/json",
     "Reseller-Flag": WOOACRY_RESELLER_FLAG,
-    "Timestamp": String(timestamp),   // MUST BE STRING
+    "Timestamp": String(timestamp),
     "Version": WOOACRY_VERSION,
     "Sign": sign
   };
