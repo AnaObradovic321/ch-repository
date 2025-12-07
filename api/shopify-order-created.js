@@ -1,16 +1,12 @@
-// api/shopify-order-created.js
 export default async function handler(req, res) {
   try {
     const order = req.body;
     console.log("Shopify order received:", order);
 
     const third_party_order_sn = order.id.toString();
-    const third_party_order_created_at = Math.floor(
-      new Date(order.created_at).getTime() / 1000
-    );
+    const third_party_order_created_at = Math.floor(new Date(order.created_at).getTime() / 1000);
 
     const third_party_user = order.email || "guest";
-
     const addr = order.shipping_address;
 
     const baseAddress = {
@@ -21,73 +17,59 @@ export default async function handler(req, res) {
       city: addr.city,
       post_code: addr.zip,
       address1: addr.address1,
-      address2: addr.address2 || "",
+      address2: addr.address2 ?? "",
       country_code: addr.country_code,
-      tax_number: ""
+      tax_number: "" // TODO: add tax logic
     };
 
     // Extract SKUs
-    let skus = [];
+    let skus = order.line_items
+      .filter(i => i.properties?.customize_no)
+      .map(i => ({
+        customize_no: i.properties.customize_no,
+        count: i.quantity
+      }));
 
-    for (const item of order.line_items) {
-      const customizeNo = item.properties?.customize_no;
-      if (!customizeNo) continue;
-
-      skus.push({
-        customize_no: customizeNo,
-        count: item.quantity
-      });
-    }
-
-    if (skus.length === 0) {
-      console.log("No customization found, no Wooacry call needed.");
+    if (skus.length === 0)
       return res.status(200).json({ ok: true });
-    }
 
-    // PREORDER REQUEST (HTTP call to Next.js API route)
-    const preorderRequest = {
-      third_party_user,
-      skus,
-      address: baseAddress
-    };
+    // Build base URL
+    const BASE = process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}`
+      : "http://localhost:3000";
 
-    const preorderResponse = await fetch(
-      `${process.env.VERCEL_URL}/api/wooacry-preorder`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(preorderRequest)
-      }
-    ).then(r => r.json());
+    // Preorder
+    const preorderResponse = await fetch(`${BASE}/api/wooacry-preorder`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        third_party_user,
+        skus,
+        address: baseAddress
+      })
+    }).then(r => r.json());
 
     const shipping_method_id =
-      preorderResponse?.data?.data?.shipping_methods?.[0]?.id;
+      preorderResponse?.data?.shipping_methods?.[0]?.id;
 
-    if (!shipping_method_id) {
-      console.error("Wooacry returned no shipping method.");
-      return res.status(500).json({ error: "No shipping from Wooacry" });
-    }
+    if (!shipping_method_id)
+      return res.status(500).json({ error: "Wooacry returned no shipping method" });
 
-    // CREATE ORDER REQUEST
-    const createOrderRequest = {
-      third_party_order_sn,
-      third_party_order_created_at,
-      third_party_user,
-      shipping_method_id,
-      skus,
-      address: baseAddress
-    };
+    // Create order
+    const createOrderResponse = await fetch(`${BASE}/api/wooacry-order-create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        third_party_order_sn,
+        third_party_order_created_at,
+        third_party_user,
+        shipping_method_id,
+        skus,
+        address: baseAddress
+      })
+    }).then(r => r.json());
 
-    const orderCreateResponse = await fetch(
-      `${process.env.VERCEL_URL}/api/wooacry-order-create`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(createOrderRequest)
-      }
-    ).then(r => r.json());
-
-    console.log("Wooacry final order created:", orderCreateResponse);
+    console.log("Wooacry final order:", createOrderResponse);
 
     return res.status(200).json({ ok: true });
 
