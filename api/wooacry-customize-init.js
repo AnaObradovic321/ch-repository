@@ -25,13 +25,12 @@ export default async function handler(req, res) {
       + `?product_id=${product_id}`
       + `&variant_id=${variant_id}`;
 
-    // Correct signature used by Wooacry redirect API
+    // Correct signature: 4-line signature, no body
     const sigString =
       `${RESELLER_FLAG}\n${timestamp}\n${version}\n${SECRET}\n`;
 
     const sign = crypto.createHash("md5").update(sigString).digest("hex");
 
-    // All params must be GET
     const finalUrl =
       `${API_URL}?reseller_flag=${RESELLER_FLAG}`
       + `&timestamp=${timestamp}`
@@ -41,31 +40,30 @@ export default async function handler(req, res) {
       + `&redirect_url=${encodeURIComponent(redirect_url)}`
       + `&sign=${sign}`;
 
-    console.log("Requesting Wooacry Redirect:", finalUrl);
+    console.log("Wooacry Redirect Request:", finalUrl);
 
-    // Wooacry redirects with 302 HTML, not JSON → we must NOT parse JSON
-    const response = await fetch(finalUrl, { method: "GET" });
+    const wooacryResponse = await fetch(finalUrl);
 
-    const text = await response.text();
+    const contentType = wooacryResponse.headers.get("content-type") || "";
 
-    // If Wooacry returns HTML with JS redirect, send it directly
-    if (text.startsWith("<")) {
-      return res.status(200).send(text);
+    // CASE 1: Wooacry returns HTML (most common)
+    if (contentType.includes("text/html")) {
+      const html = await wooacryResponse.text();
+      return res.status(200).send(html);
     }
 
-    // Otherwise attempt JSON
-    try {
-      const data = JSON.parse(text);
-      if (data?.data?.redirect_url) {
-        return res.redirect(302, data.data.redirect_url);
-      }
-      return res.status(500).json({ error: "Unexpected Wooacry response", data });
-    } catch {
-      return res.status(500).send(text);
+    // CASE 2: Wooacry returns 302 redirect
+    if (wooacryResponse.status >= 300 && wooacryResponse.status < 400) {
+      const location = wooacryResponse.headers.get("location");
+      if (location) return res.redirect(302, location);
     }
+
+    // CASE 3: Wooacry returns JSON unexpectedly
+    const text = await wooacryResponse.text();
+    return res.status(200).send(text);
 
   } catch (err) {
-    console.error("Error in customize-init:", err);
+    console.error("Wooacry Init ERROR:", err);
     return res.status(500).json({ error: err.message });
   }
 }
