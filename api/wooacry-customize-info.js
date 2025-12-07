@@ -7,14 +7,14 @@ const API_URL = "https://api-new.wooacry.com/api/reseller/open/customize/info";
 export default async function handler(req, res) {
   try {
     const { customize_no } = req.body;
-    if (!customize_no) return res.status(400).json({ error: "Missing customize_no" });
+    if (!customize_no)
+      return res.status(400).json({ error: "Missing customize_no" });
 
     const timestamp = Math.floor(Date.now() / 1000);
     const version = "1";
     const body = JSON.stringify({ customize_no });
 
-    // Construct signature string
-    const sigString = 
+    const sigString =
       `${RESELLER_FLAG}\n${timestamp}\n${version}\n${body}\n${SECRET}\n`;
 
     const sign = crypto.createHash("md5").update(sigString).digest("hex");
@@ -24,7 +24,7 @@ export default async function handler(req, res) {
       headers: {
         "Sign": sign,
         "Reseller-Flag": RESELLER_FLAG,
-        "Timestamp": timestamp,
+        "Timestamp": String(timestamp),
         "Version": version,
         "Content-Type": "application/json"
       },
