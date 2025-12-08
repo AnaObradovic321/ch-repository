@@ -4,9 +4,14 @@ import { buildHeaders } from "./wooacry-utils.js";
 const TAX_REQUIRED_COUNTRIES = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
 
 /**
- * Validate address fields according to Wooacry documentation
+ * Validate Wooacry address according to documentation
  */
 function validateAddress(address) {
+  if (!address || typeof address !== "object") {
+    throw new Error("Missing or invalid address");
+  }
+
+  // Required fields per Wooacry docs (NOT including address2 or tax_number)
   const requiredFields = [
     "first_name",
     "last_name",
@@ -15,9 +20,7 @@ function validateAddress(address) {
     "province",
     "city",
     "address1",
-    "address2",
-    "post_code",
-    "tax_number"
+    "post_code"
   ];
 
   for (const field of requiredFields) {
@@ -26,10 +29,11 @@ function validateAddress(address) {
     }
   }
 
-  // Validate tax rules for mandatory countries
-  const cc = address.country_code.toUpperCase();
+  const cc = String(address.country_code).toUpperCase();
+
+  // tax_number required ONLY for these 7 countries
   if (TAX_REQUIRED_COUNTRIES.includes(cc)) {
-    if (!address.tax_number || address.tax_number.trim() === "") {
+    if (!address.tax_number || String(address.tax_number).trim() === "") {
       throw new Error(`tax_number is required for orders shipped to ${cc}`);
     }
   }
@@ -65,17 +69,19 @@ export default async function handler(req, res) {
   try {
     const { third_party_user, skus, address } = req.body;
 
-    // Required field validations
+    // Validate user
     if (!third_party_user || typeof third_party_user !== "string") {
       return res.status(400).json({ error: "Missing or invalid third_party_user" });
     }
 
+    // Validate SKUs
     try {
       validateSKUs(skus);
     } catch (err) {
       return res.status(400).json({ error: err.message });
     }
 
+    // Validate address
     if (!address || typeof address !== "object") {
       return res.status(400).json({ error: "Missing address" });
     }
@@ -100,19 +106,22 @@ export default async function handler(req, res) {
         province: address.province,
         city: address.city,
         address1: address.address1,
-        address2: address.address2,
+        address2: address.address2 ?? "", // optional
         post_code: address.post_code,
-        tax_number: address.tax_number
+        tax_number: address.tax_number ?? "" // optional unless in required countries
       }
     };
 
     const raw = JSON.stringify(body);
 
+    /**
+     * Send the signed request to Wooacry
+     */
     const response = await fetch(
       "https://api-new.wooacry.com/api/reseller/open/order/create/pre",
       {
         method: "POST",
-        headers: buildHeaders(raw), // Signature must match raw exactly
+        headers: buildHeaders(raw),
         body: raw
       }
     );
