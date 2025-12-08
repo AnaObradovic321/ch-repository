@@ -1,7 +1,7 @@
 import { buildHeaders } from "./wooacry-utils.js";
 
 /**
- * Signed Wooacry customize/info fetch
+ * Fetch Wooacry customize/info for validation
  */
 async function fetchCustomizeInfo(customize_no) {
   const body = { customize_no };
@@ -17,16 +17,15 @@ async function fetchCustomizeInfo(customize_no) {
   );
 
   const json = await response.json();
-
   if (!json || !json.data) {
     throw new Error("Failed to retrieve customize info from Wooacry");
   }
 
-  return json.data;
+  return json.data; // Used only for SKU existence validation
 }
 
 /**
- * Validate mandatory tax field
+ * Mandatory tax number rules by country
  */
 function validateTaxNumber(country_code, tax_number) {
   const mustHaveTax = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
@@ -54,6 +53,9 @@ export default async function handler(req, res) {
       address
     } = req.body;
 
+    /**
+     * Validate required fields
+     */
     if (
       !third_party_order_sn ||
       !third_party_order_created_at ||
@@ -68,10 +70,10 @@ export default async function handler(req, res) {
       });
     }
 
-    // Validate tax number
+    // Validate tax rules
     validateTaxNumber(address.country_code, address.tax_number);
 
-    // Normalize address for Wooacry
+    // Normalize address according to Wooacry documentation
     const wooacryAddress = {
       first_name: address.first_name ?? "",
       last_name: address.last_name ?? "",
@@ -85,41 +87,61 @@ export default async function handler(req, res) {
       tax_number: address.tax_number ?? ""
     };
 
-    // Cache customize info to avoid multiple external calls
+    /**
+     * Customize info cache to reduce API calls
+     */
     const customizeCache = {};
 
-    async function getCustomize(no) {
+    async function verifyCustomize(no) {
       if (!customizeCache[no]) {
         customizeCache[no] = await fetchCustomizeInfo(no);
       }
       return customizeCache[no];
     }
 
-    // Build enriched SKUs
-    const enrichedSKUs = [];
+    /**
+     * Build SKUs for order-create
+     * IMPORTANT: Wooacry ONLY accepts:
+     * - customize_no
+     * - count
+     *
+     * DO NOT send sale_price or package_price.
+     */
+    const orderCreateSKUs = [];
 
     for (const sku of skus) {
-      const customizeData = await getCustomize(sku.customize_no);
+      if (!sku.customize_no)
+        throw new Error("SKU missing customize_no");
 
-      enrichedSKUs.push({
+      if (!sku.count || sku.count <= 0)
+        throw new Error(`Invalid count for customize_no ${sku.customize_no}`);
+
+      // Validate the customize_no exists in Wooacry
+      await verifyCustomize(sku.customize_no);
+
+      orderCreateSKUs.push({
         customize_no: sku.customize_no,
-        count: sku.count,
-        unit_sale_price: customizeData.sku.sale_price,
-        unit_package_price: customizeData.sku.package_price
+        count: sku.count
       });
     }
 
+    /**
+     * Build final request body
+     */
     const body = {
       third_party_order_sn,
       third_party_order_created_at,
       third_party_user,
       shipping_method_id,
-      skus: enrichedSKUs,
+      skus: orderCreateSKUs,
       address: wooacryAddress
     };
 
     const raw = JSON.stringify(body);
 
+    /**
+     * Call Wooacry order/create API
+     */
     const response = await fetch(
       "https://api-new.wooacry.com/api/reseller/open/order/create",
       {
