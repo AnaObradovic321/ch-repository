@@ -34,15 +34,14 @@ export default async function handler(req, res) {
 
 const sign = crypto.createHash("md5").update(sigString).digest("hex");
 
-    const finalUrl =
-      `${API_URL}` +
-      `?reseller_flag=${RESELLER_FLAG}` +
-      `&timestamp=${timestamp}` +
-      `&version=${version}` +
-      `&third_party_user=${encodeURIComponent(third_party_user)}` +
-      `&third_party_spu=${encodeURIComponent(third_party_spu)}` +
-      `&redirect_url=${encodeURIComponent(redirect_url)}` +
-      `&sign=${sign}`;
+   const finalUrl =
+  `${API_URL}` +
+  `?reseller_flag=${RESELLER_FLAG}` +
+  `&timestamp=${timestamp}` +
+  `&third_party_user=${encodeURIComponent(third_party_user)}` +
+  `&third_party_spu=${encodeURIComponent(third_party_spu)}` +
+  `&redirect_url=${encodeURIComponent(redirect_url)}` +
+  `&sign=${sign}`;
 
     console.log("Wooacry Redirect URL:", finalUrl);
 
