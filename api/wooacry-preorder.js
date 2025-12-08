@@ -1,45 +1,119 @@
 import { buildHeaders } from "./wooacry-utils.js";
 
+// Countries where tax_number must be strictly validated
+const TAX_REQUIRED_COUNTRIES = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
+
+/**
+ * Validate address fields according to Wooacry documentation
+ */
+function validateAddress(address) {
+  const requiredFields = [
+    "first_name",
+    "last_name",
+    "phone",
+    "country_code",
+    "province",
+    "city",
+    "address1",
+    "address2",
+    "post_code",
+    "tax_number"
+  ];
+
+  for (const field of requiredFields) {
+    if (!address[field] || String(address[field]).trim() === "") {
+      throw new Error(`Address field missing or empty: ${field}`);
+    }
+  }
+
+  // Validate tax rules for mandatory countries
+  const cc = address.country_code.toUpperCase();
+  if (TAX_REQUIRED_COUNTRIES.includes(cc)) {
+    if (!address.tax_number || address.tax_number.trim() === "") {
+      throw new Error(`tax_number is required for orders shipped to ${cc}`);
+    }
+  }
+}
+
+/**
+ * Validate Wooacry SKU structure
+ */
+function validateSKUs(skus) {
+  if (!Array.isArray(skus) || skus.length === 0) {
+    throw new Error("Invalid or missing skus");
+  }
+
+  for (const sku of skus) {
+    if (!sku.customize_no || typeof sku.customize_no !== "string") {
+      throw new Error("SKU missing customize_no");
+    }
+
+    if (typeof sku.count !== "number" || sku.count <= 0) {
+      throw new Error(`SKU missing valid count for customize_no ${sku.customize_no}`);
+    }
+  }
+}
+
+/**
+ * Main handler
+ */
 export default async function handler(req, res) {
-  if (req.method !== "POST")
+  if (req.method !== "POST") {
     return res.status(405).json({ error: "Method Not Allowed" });
+  }
 
   try {
     const { third_party_user, skus, address } = req.body;
 
-    // Validate required fields
-    if (!third_party_user)
-      return res.status(400).json({ error: "Missing third_party_user" });
+    // Required field validations
+    if (!third_party_user || typeof third_party_user !== "string") {
+      return res.status(400).json({ error: "Missing or invalid third_party_user" });
+    }
 
-    if (!Array.isArray(skus) || skus.length === 0)
-      return res.status(400).json({ error: "Invalid or missing skus" });
+    try {
+      validateSKUs(skus);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
 
-    if (!address)
+    if (!address || typeof address !== "object") {
       return res.status(400).json({ error: "Missing address" });
+    }
+
+    try {
+      validateAddress(address);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
 
     /**
-     * Wooacry Preorder expected request body:
-     * {
-     *   "third_party_user": "string",
-     *   "skus": [
-     *      { "customize_no": "string", "count": 0 }
-     *   ],
-     *   "address": {
-     *      first_name, last_name, phone, country_code,
-     *      province, city, address1, address2, post_code, tax_number
-     *   }
-     * }
+     * Build Wooacry-compliant preorder body
      */
+    const body = {
+      third_party_user,
+      skus,
+      address: {
+        first_name: address.first_name,
+        last_name: address.last_name,
+        phone: address.phone,
+        country_code: address.country_code.toUpperCase(),
+        province: address.province,
+        city: address.city,
+        address1: address.address1,
+        address2: address.address2,
+        post_code: address.post_code,
+        tax_number: address.tax_number
+      }
+    };
 
-    const body = { third_party_user, skus, address };
     const raw = JSON.stringify(body);
 
     const response = await fetch(
       "https://api-new.wooacry.com/api/reseller/open/order/create/pre",
       {
         method: "POST",
-        headers: buildHeaders(raw), // 100% correct signature generation
-        body: raw                   // Must match signature exactly
+        headers: buildHeaders(raw), // Signature must match raw exactly
+        body: raw
       }
     );
 
