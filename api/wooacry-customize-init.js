@@ -26,10 +26,13 @@ export default async function handler(req, res) {
     // Wooacry rule: body is EMPTY for this endpoint
     const EMPTY_BODY = "";
 
-    const sigString =
-      `${RESELLER_FLAG}\n${timestamp}\n${version}\n${EMPTY_BODY}\n${SECRET}\n`;
+ const sigString =
+  `reseller_flag=${RESELLER_FLAG}` +
+  `&timestamp=${timestamp}` +
+  `&third_party_user=${third_party_user}` +
+  `&secret=${SECRET}`;
 
-    const sign = crypto.createHash("md5").update(sigString).digest("hex");
+const sign = crypto.createHash("md5").update(sigString).digest("hex");
 
     const finalUrl =
       `${API_URL}` +
