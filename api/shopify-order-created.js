@@ -1,3 +1,7 @@
+// api/shopify-order-created.js
+
+import { validateWooacryAddress } from "./wooacry-utils.js";
+
 export default async function handler(req, res) {
   try {
     const order = req.body;
@@ -12,30 +16,32 @@ export default async function handler(req, res) {
     const addr = order.shipping_address;
 
     if (!addr) {
-      return res.status(400).json({ error: "Missing shipping address in Shopify order" });
+      return res.status(400).json({
+        error: "Missing shipping address in Shopify order"
+      });
     }
 
-    /**
-     * Build Wooacry-compliant address.
-     * All fields are required by Wooacry; tax_number is validated downstream.
-     */
-const baseAddress = {
-  first_name: addr.first_name,
-  last_name: addr.last_name,
-  phone: addr.phone,
-  province: addr.province,
-  city: addr.city,
-  post_code: addr.zip,
-  address1: addr.address1,
-  address2: addr.address2 ?? "",
-  country_code: addr.country_code?.toUpperCase(), 
-  tax_number: addr.tax_number ?? ""
-};
+    /* ----------------------------------------------------
+       STEP 1: Normalize Shopify → Wooacry address
+       ---------------------------------------------------- */
 
-    /**
-     * Extract SKUs containing customize_no.
-     * This ensures only Wooacry-customized products enter preorder/create-order pipeline.
-     */
+    const normalizedAddress = validateWooacryAddress({
+      first_name: addr.first_name ?? "",
+      last_name: addr.last_name ?? "",
+      phone: addr.phone ?? "",
+      country_code: addr.country_code ?? "",
+      province: addr.province ?? "",
+      city: addr.city ?? "",
+      address1: addr.address1 ?? "",
+      address2: addr.address2 ?? "",
+      post_code: addr.zip ?? "",
+      tax_number: addr.tax_number ?? ""
+    });
+
+    /* ----------------------------------------------------
+       STEP 2: Build SKUs list for Wooacry
+       Only items with customize_no should be sent
+       ---------------------------------------------------- */
     const skus = order.line_items
       .filter((i) => i.properties?.customize_no)
       .map((i) => ({
@@ -48,15 +54,16 @@ const baseAddress = {
       return res.status(200).json({ ok: true });
     }
 
-    /**
-     * Determine base URL for internal API calls.
-     * Allows local dev vs Vercel production environments.
-     */
+    /* ----------------------------------------------------
+       STEP 3: Internal API base URL
+       ---------------------------------------------------- */
     const BASE = process.env.VERCEL_URL
       ? `https://${process.env.VERCEL_URL}`
       : "http://localhost:3000";
 
-    // STEP 1: PREORDER
+    /* ----------------------------------------------------
+       STEP 4: PREORDER REQUEST
+       ---------------------------------------------------- */
     console.log("Sending preorder to Wooacry…");
 
     const preorderResponse = await fetch(`${BASE}/api/wooacry-preorder`, {
@@ -65,7 +72,7 @@ const baseAddress = {
       body: JSON.stringify({
         third_party_user,
         skus,
-        address: baseAddress
+        address: normalizedAddress
       })
     }).then((r) => r.json());
 
@@ -81,7 +88,9 @@ const baseAddress = {
       });
     }
 
-    // STEP 2: CREATE ORDER
+    /* ----------------------------------------------------
+       STEP 5: CREATE ORDER REQUEST
+       ---------------------------------------------------- */
     console.log("Creating Wooacry order…");
 
     const createOrderResponse = await fetch(`${BASE}/api/wooacry-order-create`, {
@@ -93,12 +102,15 @@ const baseAddress = {
         third_party_user,
         shipping_method_id,
         skus,
-        address: baseAddress
+        address: normalizedAddress
       })
     }).then((r) => r.json());
 
     console.log("Wooacry Final Order Result:", createOrderResponse);
 
+    /* ----------------------------------------------------
+       DONE
+       ---------------------------------------------------- */
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("Shopify → Wooacry Order Pipeline ERROR:", err);
