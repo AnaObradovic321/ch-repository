@@ -19,18 +19,18 @@ export default async function handler(req, res) {
      * Build Wooacry-compliant address.
      * All fields are required by Wooacry; tax_number is validated downstream.
      */
-    const baseAddress = {
-      first_name: addr.first_name,
-      last_name: addr.last_name,
-      phone: addr.phone,
-      province: addr.province,
-      city: addr.city,
-      post_code: addr.zip,
-      address1: addr.address1,
-      address2: addr.address2 ?? "",
-      country_code: addr.country_code,
-      tax_number: addr.tax_number ?? "" // May be empty; create-order handler enforces rules
-    };
+const baseAddress = {
+  first_name: addr.first_name,
+  last_name: addr.last_name,
+  phone: addr.phone,
+  province: addr.province,
+  city: addr.city,
+  post_code: addr.zip,
+  address1: addr.address1,
+  address2: addr.address2 ?? "",
+  country_code: addr.country_code?.toUpperCase(), 
+  tax_number: addr.tax_number ?? ""
+};
 
     /**
      * Extract SKUs containing customize_no.
