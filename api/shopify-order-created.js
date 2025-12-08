@@ -23,8 +23,8 @@ export default async function handler(req, res) {
 
     /* ----------------------------------------------------
        STEP 1: Normalize Shopify → Wooacry address
+       Guarantee the structure produces stable JSON
        ---------------------------------------------------- */
-
     const normalizedAddress = validateWooacryAddress({
       first_name: addr.first_name ?? "",
       last_name: addr.last_name ?? "",
@@ -39,14 +39,14 @@ export default async function handler(req, res) {
     });
 
     /* ----------------------------------------------------
-       STEP 2: Build SKUs list for Wooacry
-       Only items with customize_no should be sent
+       STEP 2: Build SKUs for Wooacry
+       Must be stable and clean
        ---------------------------------------------------- */
     const skus = order.line_items
       .filter((i) => i.properties?.customize_no)
       .map((i) => ({
-        customize_no: i.properties.customize_no,
-        count: i.quantity
+        customize_no: String(i.properties.customize_no),
+        count: Number(i.quantity)
       }));
 
     if (skus.length === 0) {
@@ -63,17 +63,22 @@ export default async function handler(req, res) {
 
     /* ----------------------------------------------------
        STEP 4: PREORDER REQUEST
+       MUST pass stable JSON to Wooacry
        ---------------------------------------------------- */
+    const preorderBody = {
+      third_party_user,
+      skus,
+      address: normalizedAddress
+    };
+
     console.log("Sending preorder to Wooacry…");
 
     const preorderResponse = await fetch(`${BASE}/api/wooacry-preorder`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        third_party_user,
-        skus,
-        address: normalizedAddress
-      })
+
+      // Fix #5: Shopify → Wooacry must use the exact JSON structure
+      body: JSON.stringify(preorderBody)
     }).then((r) => r.json());
 
     console.log("Wooacry Preorder Result:", preorderResponse);
@@ -90,28 +95,31 @@ export default async function handler(req, res) {
 
     /* ----------------------------------------------------
        STEP 5: CREATE ORDER REQUEST
+       MUST also pass stable JSON
        ---------------------------------------------------- */
+    const createOrderBody = {
+      third_party_order_sn,
+      third_party_order_created_at,
+      third_party_user,
+      shipping_method_id,
+      skus,
+      address: normalizedAddress
+    };
+
     console.log("Creating Wooacry order…");
 
     const createOrderResponse = await fetch(`${BASE}/api/wooacry-order-create`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        third_party_order_sn,
-        third_party_order_created_at,
-        third_party_user,
-        shipping_method_id,
-        skus,
-        address: normalizedAddress
-      })
+
+      // Fix #5 applied again
+      body: JSON.stringify(createOrderBody)
     }).then((r) => r.json());
 
     console.log("Wooacry Final Order Result:", createOrderResponse);
 
-    /* ----------------------------------------------------
-       DONE
-       ---------------------------------------------------- */
     return res.status(200).json({ ok: true });
+
   } catch (err) {
     console.error("Shopify → Wooacry Order Pipeline ERROR:", err);
     return res.status(500).json({ error: err.message });
