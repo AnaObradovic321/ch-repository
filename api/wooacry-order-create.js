@@ -1,19 +1,23 @@
 import { buildHeaders } from "./wooacry-utils.js";
 
 /**
- * Fetches Wooacry customize info so we can enrich SKUs
+ * Signed Wooacry customize/info fetch
  */
 async function fetchCustomizeInfo(customize_no) {
+  const body = { customize_no };
+  const raw = JSON.stringify(body);
+
   const response = await fetch(
     "https://api-new.wooacry.com/api/reseller/open/customize/info",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ customize_no })
+      headers: buildHeaders(raw),
+      body: raw
     }
   );
 
   const json = await response.json();
+
   if (!json || !json.data) {
     throw new Error("Failed to retrieve customize info from Wooacry");
   }
@@ -22,29 +26,23 @@ async function fetchCustomizeInfo(customize_no) {
 }
 
 /**
- * Tax number enforcement according to Wooacry documentation
+ * Validate mandatory tax field
  */
 function validateTaxNumber(country_code, tax_number) {
-  const mustHaveTax = [
-    "TR", // Turkey
-    "MX", // Mexico
-    "CL", // Chile
-    "BR", // Brazil
-    "ZA", // South Africa
-    "KR", // Korea
-    "AR"  // Argentina
-  ];
+  const mustHaveTax = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
+  const cc = (country_code || "").toUpperCase();
 
-  if (mustHaveTax.includes(country_code.toUpperCase())) {
+  if (mustHaveTax.includes(cc)) {
     if (!tax_number || tax_number.trim() === "") {
-      throw new Error(`Missing required tax_number for ${country_code}`);
+      throw new Error(`Missing required tax_number for ${cc}`);
     }
   }
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST")
+  if (req.method !== "POST") {
     return res.status(405).json({ error: "Method Not Allowed" });
+  }
 
   try {
     const {
@@ -70,35 +68,38 @@ export default async function handler(req, res) {
       });
     }
 
-    // Validate tax number rules
+    // Validate tax number
     validateTaxNumber(address.country_code, address.tax_number);
 
-    // Convert address to Wooacry's required format
+    // Normalize address for Wooacry
     const wooacryAddress = {
-      first_name: address.first_name,
-      last_name: address.last_name,
-      phone: address.phone,
-      country_code: address.country_code,
-      province: address.province,
-      city: address.city,
-      address1: address.address1,
+      first_name: address.first_name ?? "",
+      last_name: address.last_name ?? "",
+      phone: address.phone ?? "",
+      country_code: (address.country_code || "").toUpperCase(),
+      province: address.province ?? "",
+      city: address.city ?? "",
+      address1: address.address1 ?? "",
       address2: address.address2 ?? "",
-      post_code: address.post_code,
+      post_code: address.post_code ?? "",
       tax_number: address.tax_number ?? ""
     };
 
-    /**
-     * Build enriched SKUs:
-     * Wooacry requires:
-     *  - customize_no
-     *  - count
-     *  - unit_sale_price
-     *  - unit_package_price
-     */
+    // Cache customize info to avoid multiple external calls
+    const customizeCache = {};
+
+    async function getCustomize(no) {
+      if (!customizeCache[no]) {
+        customizeCache[no] = await fetchCustomizeInfo(no);
+      }
+      return customizeCache[no];
+    }
+
+    // Build enriched SKUs
     const enrichedSKUs = [];
 
     for (const sku of skus) {
-      const customizeData = await fetchCustomizeInfo(sku.customize_no);
+      const customizeData = await getCustomize(sku.customize_no);
 
       enrichedSKUs.push({
         customize_no: sku.customize_no,
@@ -108,7 +109,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Build body exactly as Wooacry expects
     const body = {
       third_party_order_sn,
       third_party_order_created_at,
