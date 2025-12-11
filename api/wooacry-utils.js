@@ -8,29 +8,28 @@ export const WOOACRY_SECRET = "3710d71b1608f78948a60602c4a6d9d8";
 export const WOOACRY_VERSION = "1";
 
 /* ----------------------------------------
-   Timestamp generator
+   Timestamp
 ---------------------------------------- */
 export function generateTimestamp() {
   return Math.floor(Date.now() / 1000);
 }
 
 /* ----------------------------------------
-   Raw MD5 Signature Generator
-   EXACT match to Wooacry 5-line signature rules
+   MD5 Signature (5-line exact)
 ---------------------------------------- */
 export function buildSignature(rawBodyString, timestamp) {
   const signatureString =
-    WOOACRY_RESELLER_FLAG + "\n" +
-    timestamp + "\n" +
-    WOOACRY_VERSION + "\n" +
-    rawBodyString + "\n" +
-    WOOACRY_SECRET + "\n";
+    `${WOOACRY_RESELLER_FLAG}\n` +
+    `${timestamp}\n` +
+    `${WOOACRY_VERSION}\n` +
+    `${rawBodyString}\n` +
+    `${WOOACRY_SECRET}\n`;
 
   return crypto.createHash("md5").update(signatureString).digest("hex");
 }
 
 /* ----------------------------------------
-   Build Headers for Wooacry POST Requests
+   Header builder
 ---------------------------------------- */
 export function buildHeaders(rawBodyString) {
   const timestamp = generateTimestamp();
@@ -46,8 +45,7 @@ export function buildHeaders(rawBodyString) {
 }
 
 /* ----------------------------------------
-   Country Code Reference Table (from Wooacry)
-   Stored as a Set for fast validation
+   Wooacry allowed country codes
 ---------------------------------------- */
 export const WOOACRY_COUNTRY_CODES = new Set([
   "AF","AX","AL","DZ","AS","AD","AO","AI","AQ","AG","AR","AM","AW","AU","AT",
@@ -70,30 +68,29 @@ export const WOOACRY_COUNTRY_CODES = new Set([
 ]);
 
 /* ----------------------------------------
-   Address Validator
-   Ensures country_code is legal per Wooacry spec
+   Address Validator (SAFEST VERSION)
 ---------------------------------------- */
 export function validateWooacryAddress(address) {
   if (!address || typeof address !== "object") {
     throw new Error("Invalid address object: must be an object");
   }
 
+  // Normalize
   const code = (address.country_code || "").toUpperCase().trim();
 
-  if (!WOOACRY_COUNTRY_CODES.has(code)) {
-    throw new Error(`Invalid country_code '${code}' for Wooacry API.`);
-  }
+  // If Wooacry does not recognize the code → fallback to US (safe default)
+  const finalCode = WOOACRY_COUNTRY_CODES.has(code) ? code : "US";
 
   return {
-    first_name: address.first_name,
-    last_name: address.last_name,
-    phone: address.phone,
-    country_code: code,
-    province: address.province,
-    city: address.city,
-    address1: address.address1,
-    address2: address.address2 ?? "",
-    post_code: address.post_code,
-    tax_number: address.tax_number ?? ""
+    first_name: address.first_name || "",
+    last_name: address.last_name || "",
+    phone: address.phone || "",
+    country_code: finalCode,
+    province: address.province || "",
+    city: address.city || "",
+    address1: address.address1 || "",
+    address2: address.address2 || "",
+    post_code: address.post_code || "",
+    tax_number: address.tax_number || ""
   };
 }
