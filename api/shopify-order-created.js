@@ -1,21 +1,54 @@
+import crypto from "crypto";
 import { validateWooacryAddress } from "./wooacry-utils.js";
 
+// -------------------------------
+// CONFIG
+// -------------------------------
+const RESELLER_FLAG = "characterhub";
+const SECRET = "3710d71b1608f78948a60602c4a6d9d8";
+
+// Wooacry SKU → Shopify variant mapping
+const SKU_TO_VARIANT = {
+  "70": "42832621797489"  // Poster SKU → Shopify Variant ID
+};
+
+// -------------------------------
+// SIGNATURE BUILDER
+// -------------------------------
+function buildSign(bodyString, timestamp) {
+  const version = "1";
+
+  const sigString =
+    `${RESELLER_FLAG}\n` +
+    `${timestamp}\n` +
+    `${version}\n` +
+    `${bodyString}\n` +
+    `${SECRET}\n`;
+
+  return crypto.createHash("md5").update(sigString).digest("hex");
+}
+
+// -------------------------------
+// MAIN HANDLER
+// -------------------------------
 export default async function handler(req, res) {
   try {
     const order = req.body;
-    console.log("Shopify order received:", order.id);
+    console.log("[SHOPIFY ORDER] Received:", order.id);
 
     const third_party_order_sn = String(order.id);
     const third_party_order_created_at = Math.floor(new Date(order.created_at).getTime() / 1000);
     const third_party_user = order.email || "guest";
-    const addr = order.shipping_address;
 
+    const addr = order.shipping_address;
     if (!addr) {
-      console.log("No shipping address, skipping.");
+      console.log("[SHOPIFY ORDER] No shipping address → ignore.");
       return res.status(200).json({ ok: true });
     }
 
-    // 1. Extract only Wooacry custom items
+    // -----------------------------------------
+    // Extract Wooacry customized items
+    // -----------------------------------------
     const skus = order.line_items
       .filter(i => i.properties && i.properties.customize_no)
       .map(i => ({
@@ -24,11 +57,15 @@ export default async function handler(req, res) {
       }));
 
     if (skus.length === 0) {
-      console.log("No Wooacry custom items.");
+      console.log("[SHOPIFY ORDER] No Wooacry items → nothing to send.");
       return res.status(200).json({ ok: true });
     }
 
-    // 2. Normalize address
+    console.log("[WOEACRY] Found custom items:", skus);
+
+    // -----------------------------------------
+    // Normalize address for Wooacry
+    // -----------------------------------------
     let normalizedAddress = validateWooacryAddress({
       first_name: addr.first_name || "",
       last_name: addr.last_name || "",
@@ -42,14 +79,14 @@ export default async function handler(req, res) {
       tax_number: addr.tax_number || ""
     });
 
-    // Force body fields to correct types for Wooacry signature rules
+    // Force all fields to strings
     Object.keys(normalizedAddress).forEach(k => {
       if (typeof normalizedAddress[k] !== "string") {
         normalizedAddress[k] = String(normalizedAddress[k] || "");
       }
     });
 
-    // 3. Tax number enforcement for mandatory countries
+    // Tax ID enforcement
     const requiresTaxID = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
     if (requiresTaxID.includes(normalizedAddress.country_code) && !normalizedAddress.tax_number) {
       return res.status(400).json({
@@ -58,64 +95,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // 4. Internal endpoint base URL
+    // Internal domain
     const host = req.headers.host;
-    const protocol = req.headers["x-forwarded-proto"] || "https";
-    const BASE = `${protocol}://${host}`;
-
-    // 5. PREORDER
-    const preorderResponse = await fetch(`${BASE}/api/wooacry-preorder`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        third_party_user,
-        skus,
-        address: normalizedAddress
-      })
-    }).then(r => r.json());
-
-    if (
-      !preorderResponse ||
-      !preorderResponse.data ||
-      !Array.isArray(preorderResponse.data.shipping_methods) ||
-      preorderResponse.data.shipping_methods.length === 0
-    ) {
-      console.error("Wooacry Preorder error:", preorderResponse);
-      return res.status(500).json({ error: "Preorder failed", details: preorderResponse });
-    }
-
-    const shipping_method_id = preorderResponse.data.shipping_methods[0].id;
-
-    // 6. CREATE ORDER
-    const createOrderResponse = await fetch(`${BASE}/api/wooacry-order-create`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        third_party_order_sn,
-        third_party_order_created_at,
-        third_party_user,
-        shipping_method_id,
-        skus,
-        address: normalizedAddress
-      })
-    }).then(r => r.json());
-
-    console.log("Wooacry Final Order:", createOrderResponse);
-
-    if (createOrderResponse.code !== 0) {
-      return res.status(500).json({
-        error: "Wooacry Create Order Error",
-        details: createOrderResponse
-      });
-    }
-
-    return res.status(200).json({
-      ok: true,
-      wooacry_sn: createOrderResponse.data.order_sn
-    });
-
-  } catch (err) {
-    console.error("Pipeline Error:", err);
-    return res.status(500).json({ error: err.message });
-  }
-}
+    const protocol = r
