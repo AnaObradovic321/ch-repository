@@ -15,19 +15,44 @@ export default async function handler(req, res) {
     const timestamp = Math.floor(Date.now() / 1000);
     console.log("[wooacry-customize-init] timestamp =", timestamp);
 
-    const version = "1";
-
     const third_party_user = "guest";
-    const third_party_spu = product_id;
 
+    // 1. Fetch metafields from Shopify
+    const shopifyMetaRes = await fetch(
+      `https://characterhub-merch-store.myshopify.com/admin/api/2024-01/products/${product_id}/metafields.json`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const metaData = await shopifyMetaRes.json();
+
+    if (!metaData.metafields) {
+      throw new Error("No metafields returned from Shopify");
+    }
+
+    // 2. Find Wooacry SPU metafield
+    const spuMeta = metaData.metafields.find(
+      (m) => m.namespace === "wooacry" && m.key === "spu"
+    );
+
+    if (!spuMeta || !spuMeta.value) {
+      console.error("SPU metafields returned:", metaData.metafields);
+      throw new Error("Wooacry SPU metafield missing for this product");
+    }
+
+    const third_party_spu = spuMeta.value;
+
+    // Build redirect url
     const redirect_url =
       `https://characterhub-merch-store.myshopify.com/pages/wooacry-callback` +
       `?product_id=${product_id}` +
       `&variant_id=${variant_id}`;
 
-    // Wooacry rule: body is EMPTY for this endpoint
-    const EMPTY_BODY = "";
-
+    // Signature
     const sigString =
       `reseller_flag=${RESELLER_FLAG}` +
       `&timestamp=${timestamp}` +
@@ -47,24 +72,20 @@ export default async function handler(req, res) {
 
     console.log("Wooacry Redirect URL:", finalUrl);
 
-    // Call Wooacry endpoint
+    // Wooacry request
     const wooacryResponse = await fetch(finalUrl);
-
     const contentType = wooacryResponse.headers.get("content-type") || "";
 
-    // CASE 1: Wooacry returns HTML editor page
     if (contentType.includes("text/html")) {
       const html = await wooacryResponse.text();
       return res.status(200).send(html);
     }
 
-    // CASE 2: Wooacry returns a redirect header
     if (wooacryResponse.status >= 300 && wooacryResponse.status < 400) {
       const location = wooacryResponse.headers.get("location");
       if (location) return res.redirect(302, location);
     }
 
-    // CASE 3: Wooacry returned JSON or text
     const text = await wooacryResponse.text();
     return res.status(200).send(text);
 
