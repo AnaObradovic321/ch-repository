@@ -97,4 +97,98 @@ export default async function handler(req, res) {
 
     // Internal domain
     const host = req.headers.host;
-    const protocol = r
+    const protocol = req.headers["x-forwarded-proto"] || "https";
+    const BASE = `${protocol}://${host}`;
+
+    // -----------------------------------------
+    // PRE-ORDER
+    // -----------------------------------------
+    const preorderBody = {
+      third_party_user,
+      skus,
+      address: normalizedAddress
+    };
+    const preorderBodyString = JSON.stringify(preorderBody);
+    const preorderTimestamp = Math.floor(Date.now() / 1000);
+    const preorderSign = buildSign(preorderBodyString, preorderTimestamp);
+
+    const preorderResp = await fetch("https://api-new.wooacry.com/api/reseller/open/order/create/pre", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Reseller-Flag": RESELLER_FLAG,
+        "Timestamp": preorderTimestamp,
+        "Version": "1",
+        "Sign": preorderSign
+      },
+      body: preorderBodyString
+    });
+
+    const preorderJSON = await preorderResp.json();
+    console.log("[WOOACRY PRE-ORDER] RESPONSE:", preorderJSON);
+
+    if (
+      !preorderJSON ||
+      preorderJSON.code !== 0 ||
+      !preorderJSON.data ||
+      !Array.isArray(preorderJSON.data.shipping_methods)
+    ) {
+      return res.status(500).json({
+        error: "Preorder failed",
+        details: preorderJSON
+      });
+    }
+
+    const shipping_method_id = preorderJSON.data.shipping_methods[0].id;
+    console.log("[WOOACRY] Selected shipping method:", shipping_method_id);
+
+    // -----------------------------------------
+    // CREATE ORDER
+    // -----------------------------------------
+    const orderBody = {
+      third_party_order_sn,
+      third_party_order_created_at,
+      third_party_user,
+      shipping_method_id,
+      skus,
+      address: normalizedAddress
+    };
+    const orderBodyString = JSON.stringify(orderBody);
+    const orderTimestamp = Math.floor(Date.now() / 1000);
+    const orderSign = buildSign(orderBodyString, orderTimestamp);
+
+    const createResp = await fetch("https://api-new.wooacry.com/api/reseller/open/order/create", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Reseller-Flag": RESELLER_FLAG,
+        "Timestamp": orderTimestamp,
+        "Version": "1",
+        "Sign": orderSign
+      },
+      body: orderBodyString
+    });
+
+    const createJSON = await createResp.json();
+    console.log("[WOOACRY CREATE ORDER] RESPONSE:", createJSON);
+
+    if (!createJSON || createJSON.code !== 0) {
+      return res.status(500).json({
+        error: "Wooacry Create Order Error",
+        details: createJSON
+      });
+    }
+
+    // -----------------------------------------
+    // SUCCESS → Return Wooacry manufacturing SN
+    // -----------------------------------------
+    return res.status(200).json({
+      ok: true,
+      wooacry_sn: createJSON.data.order_sn
+    });
+
+  } catch (err) {
+    console.error("[WOOACRY PIPELINE ERROR]", err);
+    return res.status(500).json({ error: err.message });
+  }
+}
