@@ -4,6 +4,12 @@ const RESELLER_FLAG = "characterhub";
 const SECRET = "3710d71b1608f78948a60602c4a6d9d8";
 const API_URL = "https://api-new.wooacry.com/api/reseller/web/editor/redirect";
 
+// HARD CODE SPU MAPPING HERE
+const SPU_MAP = {
+  "7551372951665": "453" // Posters
+  // Add more product_id → SPU mappings here
+};
+
 export default async function handler(req, res) {
   try {
     const { product_id, variant_id } = req.query;
@@ -12,47 +18,31 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing product_id or variant_id" });
     }
 
+    // 1. Hardcode SPU lookup
+    const third_party_spu = SPU_MAP[product_id];
+
+    if (!third_party_spu) {
+      return res.status(500).json({
+        error: `No SPU configured for product ${product_id}`,
+        hint: "Add it to SPU_MAP in the code"
+      });
+    }
+
+    // 2. Timestamp
     const timestamp = Math.floor(Date.now() / 1000);
     console.log("[wooacry-customize-init] timestamp =", timestamp);
+    console.log("[wooacry-customize-init] product_id =", product_id);
+    console.log("[wooacry-customize-init] SPU =", third_party_spu);
 
     const third_party_user = "guest";
 
-    // 1. Fetch metafields from Shopify
-    const shopifyMetaRes = await fetch(
-      `https://characterhub-merch-store.myshopify.com/admin/api/2024-01/products/${product_id}/metafields.json`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const metaData = await shopifyMetaRes.json();
-
-    if (!metaData.metafields) {
-      throw new Error("No metafields returned from Shopify");
-    }
-
-    // 2. Find Wooacry SPU metafield
-    const spuMeta = metaData.metafields.find(
-      (m) => m.namespace === "wooacry" && m.key === "spu"
-    );
-
-    if (!spuMeta || !spuMeta.value) {
-      console.error("SPU metafields returned:", metaData.metafields);
-      throw new Error("Wooacry SPU metafield missing for this product");
-    }
-
-    const third_party_spu = spuMeta.value;
-
-    // Build redirect url
+    // 3. Callback URL
     const redirect_url =
       `https://characterhub-merch-store.myshopify.com/pages/wooacry-callback` +
       `?product_id=${product_id}` +
       `&variant_id=${variant_id}`;
 
-    // Signature
+    // 4. Signature
     const sigString =
       `reseller_flag=${RESELLER_FLAG}` +
       `&timestamp=${timestamp}` +
@@ -61,6 +51,7 @@ export default async function handler(req, res) {
 
     const sign = crypto.createHash("md5").update(sigString).digest("hex");
 
+    // 5. Final Wooacry URL
     const finalUrl =
       `${API_URL}` +
       `?reseller_flag=${RESELLER_FLAG}` +
@@ -72,7 +63,6 @@ export default async function handler(req, res) {
 
     console.log("Wooacry Redirect URL:", finalUrl);
 
-    // Wooacry request
     const wooacryResponse = await fetch(finalUrl);
     const contentType = wooacryResponse.headers.get("content-type") || "";
 
