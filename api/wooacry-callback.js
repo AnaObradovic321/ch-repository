@@ -3,9 +3,9 @@ import crypto from "crypto";
 const RESELLER_FLAG = "characterhub";
 const SECRET = "3710d71b1608f78948a60602c4a6d9d8";
 
-// 1. ADD YOUR SKU → SHOPIFY VARIANT MAPPING HERE
+// Wooacry SKU → Shopify Variant ID mapping
 const SKU_TO_VARIANT = {
-  "70": "42832621797489"  // Poster SKU → Shopify Variant
+  "70": "42832621797489"   // Poster
 };
 
 // Helper to generate Wooacry API signature
@@ -25,10 +25,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing customize_no" });
     }
 
-    // 2. Call Wooacry customize/info to get SKU
+    // 1. Fetch Wooacry customize-info to get SKU
     const bodyJSON = JSON.stringify({ customize_no });
     const timestamp = Math.floor(Date.now() / 1000);
-
     const sign = generateSignature(bodyJSON, timestamp);
 
     const wooacryResp = await fetch(
@@ -57,21 +56,23 @@ export default async function handler(req, res) {
 
     const skuId = data.data.sku.id.toString();
 
-    // 3. Convert Wooacry SKU → Shopify Variant
-    const shopifyVariant = SKU_TO_VARIANT[skuId];
+    // 2. Map Wooacry SKU → Shopify Variant
+    const shopifyVariantId = SKU_TO_VARIANT[skuId];
 
-    if (!shopifyVariant) {
+    if (!shopifyVariantId) {
       return res.status(500).json({
         error: "Missing SKU → Shopify Variant mapping",
         skuId,
-        message: "Add this SKU to your SKU_TO_VARIANT map"
+        message: "Add this SKU to SKU_TO_VARIANT"
       });
     }
 
-    // 4. Redirect user to Shopify cart with variant + customize_no
+    // 3. Redirect user to Shopify's ONLY supported property-add endpoint
     const redirectUrl =
-      `https://characterhub-merch-store.myshopify.com/cart/${shopifyVariant}:1` +
-      `?properties[customize_no]=${customize_no}`;
+      `https://characterhub-merch-store.myshopify.com/cart/add` +
+      `?id=${shopifyVariantId}` +
+      `&quantity=1` +
+      `&properties[customize_no]=${encodeURIComponent(customize_no)}`;
 
     return res.redirect(302, redirectUrl);
 
