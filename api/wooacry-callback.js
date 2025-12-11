@@ -1,64 +1,66 @@
 import crypto from "crypto";
 
-const API_BASE = "https://api-new.wooacry.com";
 const RESELLER_FLAG = "characterhub";
 const SECRET = "3710d71b1608f78948a60602c4a6d9d8";
-const VERSION = "1";
 
-// Wooacry SKU → Shopify Variant mapping
+// 1. ADD YOUR SKU → SHOPIFY VARIANT MAPPING HERE
 const SKU_TO_VARIANT = {
-  "54": "42832621797489" // example
+  "70": "42832621797489"  // Poster SKU → Shopify Variant
 };
 
+// Helper to generate Wooacry API signature
 function generateSignature(body, timestamp) {
-  const sigString =
-    `${RESELLER_FLAG}\n` +
-    `${timestamp}\n` +
-    `${VERSION}\n` +
-    `${body}\n` +
-    `${SECRET}\n`;
+  const version = "1";
+  const signatureString =
+    `${RESELLER_FLAG}\n${timestamp}\n${version}\n${body}\n${SECRET}\n`;
 
-  return crypto.createHash("md5").update(sigString).digest("hex");
+  return crypto.createHash("md5").update(signatureString).digest("hex");
 }
 
 export default async function handler(req, res) {
   try {
-    const customize_no = req.query.customize_no;
+    const { customize_no } = req.query;
+
     if (!customize_no) {
-      return res.status(400).send("Missing customize_no");
+      return res.status(400).json({ error: "Missing customize_no" });
     }
 
-    // 1 — Build body for Wooacry request
-    const bodyObj = { customize_no };
-    const bodyStr = JSON.stringify(bodyObj);
-
+    // 2. Call Wooacry customize/info to get SKU
+    const bodyJSON = JSON.stringify({ customize_no });
     const timestamp = Math.floor(Date.now() / 1000);
-    const sign = generateSignature(bodyStr, timestamp);
 
-    // 2 — Call Wooacry customize info API
-    const wooacryResponse = await fetch(`${API_BASE}/api/reseller/open/customize/info`, {
-      method: "POST",
-      headers: {
-        "Reseller-Flag": RESELLER_FLAG,
-        "Timestamp": String(timestamp),
-        "Version": VERSION,
-        "Sign": sign,
-        "Content-Type": "application/json"
-      },
-      body: bodyStr
-    });
+    const sign = generateSignature(bodyJSON, timestamp);
 
-    const data = await wooacryResponse.json();
+    const wooacryResp = await fetch(
+      "https://api-new.wooacry.com/api/reseller/open/customize/info",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Reseller-Flag": RESELLER_FLAG,
+          "Timestamp": timestamp,
+          "Version": "1",
+          "Sign": sign
+        },
+        body: bodyJSON
+      }
+    );
+
+    const data = await wooacryResp.json();
 
     if (data.code !== 0) {
-      console.error("Wooacry customize info error:", data);
-      return res.status(500).json({ error: "Wooacry customize info failed", details: data });
+      return res.status(500).json({
+        error: "Wooacry customize/info failed",
+        wooacry: data
+      });
     }
 
-    const skuId = String(data.data.sku.id);
-    const variantId = SKU_TO_VARIANT[skuId];
+    const skuId = data.data.sku.id.toString();
 
-    if (!variantId) {
+    // 3. Convert Wooacry SKU → Shopify Variant
+    const shopifyVariant = SKU_TO_VARIANT[skuId];
+
+    if (!shopifyVariant) {
       return res.status(500).json({
         error: "Missing SKU → Shopify Variant mapping",
         skuId,
@@ -66,35 +68,15 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3 — Add to Shopify cart using AJAX API
-    const cartAddResponse = await fetch(
-      "https://characterhub-merch-store.myshopify.com/cart/add.js",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: variantId,
-          quantity: 1,
-          properties: {
-            customize_no
-          }
-        })
-      }
-    );
+    // 4. Redirect user to Shopify cart with variant + customize_no
+    const redirectUrl =
+      `https://characterhub-merch-store.myshopify.com/cart/${shopifyVariant}:1` +
+      `?properties[customize_no]=${customize_no}`;
 
-    if (!cartAddResponse.ok) {
-      const txt = await cartAddResponse.text();
-      return res.status(500).json({
-        error: "Failed to add to Shopify cart",
-        details: txt
-      });
-    }
-
-    // 4 — Redirect user to Shopify cart page
-    return res.redirect(302, "https://characterhub-merch-store.myshopify.com/cart");
+    return res.redirect(302, redirectUrl);
 
   } catch (err) {
-    console.error("Callback error:", err);
+    console.error("CALLBACK ERROR:", err);
     return res.status(500).json({ error: err.message });
   }
 }
