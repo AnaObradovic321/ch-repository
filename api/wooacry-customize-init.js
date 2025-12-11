@@ -18,9 +18,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing product_id or variant_id" });
     }
 
-    // 1. Hardcode SPU lookup
+    // 1. Hardcoded SPU lookup
     const third_party_spu = SPU_MAP[product_id];
-
     if (!third_party_spu) {
       return res.status(500).json({
         error: `No SPU configured for product ${product_id}`,
@@ -28,21 +27,18 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2. Timestamp
     const timestamp = Math.floor(Date.now() / 1000);
+    const third_party_user = "guest";
+
     console.log("[wooacry-customize-init] timestamp =", timestamp);
     console.log("[wooacry-customize-init] product_id =", product_id);
     console.log("[wooacry-customize-init] SPU =", third_party_spu);
 
-    const third_party_user = "guest";
-
-    // 3. Callback URL
+    // 2. CALLBACK MUST BE AN API ROUTE — NOT A SHOPIFY PAGE
     const redirect_url =
-      `https://characterhub-merch-store.myshopify.com/pages/wooacry-callback` +
-      `?product_id=${product_id}` +
-      `&variant_id=${variant_id}`;
+      `https://ch-repository.vercel.app/api/wooacry-callback?product_id=${product_id}&variant_id=${variant_id}`;
 
-    // 4. Signature
+    // 3. Build signature (matches Wooacry docs exactly)
     const sigString =
       `reseller_flag=${RESELLER_FLAG}` +
       `&timestamp=${timestamp}` +
@@ -51,7 +47,7 @@ export default async function handler(req, res) {
 
     const sign = crypto.createHash("md5").update(sigString).digest("hex");
 
-    // 5. Final Wooacry URL
+    // 4. Construct redirect request URL
     const finalUrl =
       `${API_URL}` +
       `?reseller_flag=${RESELLER_FLAG}` +
@@ -61,23 +57,27 @@ export default async function handler(req, res) {
       `&redirect_url=${encodeURIComponent(redirect_url)}` +
       `&sign=${sign}`;
 
-    console.log("Wooacry Redirect URL:", finalUrl);
+    console.log("Wooacry Final Redirect URL:", finalUrl);
 
-    const wooacryResponse = await fetch(finalUrl);
-    const contentType = wooacryResponse.headers.get("content-type") || "";
+    // 5. IMPORTANT: Prevent automatic redirect-following
+    const wooacryResponse = await fetch(finalUrl, { redirect: "manual" });
 
-    if (contentType.includes("text/html")) {
-      const html = await wooacryResponse.text();
-      return res.status(200).send(html);
+    // 6. Extract Wooacry redirect destination
+    const editorLocation = wooacryResponse.headers.get("location");
+
+    if (!editorLocation) {
+      const body = await wooacryResponse.text();
+      console.error("Wooacry did not return a redirect. Body:", body);
+      return res.status(500).json({
+        error: "Wooacry did not provide redirect location.",
+        details: body
+      });
     }
 
-    if (wooacryResponse.status >= 300 && wooacryResponse.status < 400) {
-      const location = wooacryResponse.headers.get("location");
-      if (location) return res.redirect(302, location);
-    }
+    console.log("Redirecting user to Wooacry editor:", editorLocation);
 
-    const text = await wooacryResponse.text();
-    return res.status(200).send(text);
+    // 7. Send the user directly to Wooacry editor (fixes infinite spinner)
+    return res.redirect(302, editorLocation);
 
   } catch (err) {
     console.error("Wooacry Init ERROR:", err);
