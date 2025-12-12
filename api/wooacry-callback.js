@@ -1,81 +1,54 @@
 import crypto from "crypto";
 
-const RESELLER_FLAG = "characterhub";
-const SECRET = "3710d71b1608f78948a60602c4a6d9d8";
-
-// Wooacry SKU → Shopify Variant ID mapping
-const SKU_TO_VARIANT = {
-  "70": "42832621797489"   // Poster
-};
-
-// Helper to generate Wooacry API signature
-function generateSignature(body, timestamp) {
-  const version = "1";
-  const signatureString =
-    `${RESELLER_FLAG}\n${timestamp}\n${version}\n${body}\n${SECRET}\n`;
-
-  return crypto.createHash("md5").update(signatureString).digest("hex");
-}
+const SHOPIFY_STORE = "characterhub-merch-store";
 
 export default async function handler(req, res) {
+  const { customize_no } = req.query;
+
+  if (!customize_no) {
+    return res.status(400).json({ error: "Missing customize_no" });
+  }
+
   try {
-    const { customize_no } = req.query;
-
-    if (!customize_no) {
-      return res.status(400).json({ error: "Missing customize_no" });
-    }
-
-    // 1. Fetch Wooacry customize-info to get SKU
+    // 1. CALL WOOACRY customize/info
     const bodyJSON = JSON.stringify({ customize_no });
     const timestamp = Math.floor(Date.now() / 1000);
-    const sign = generateSignature(bodyJSON, timestamp);
 
-    const wooacryResp = await fetch(
-      "https://api-new.wooacry.com/api/reseller/open/customize/info",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Reseller-Flag": RESELLER_FLAG,
-          "Timestamp": timestamp,
-          "Version": "1",
-          "Sign": sign
-        },
-        body: bodyJSON
-      }
-    );
+    const signatureString =
+      `characterhub\n${timestamp}\n1\n${bodyJSON}\n3710d71b1608f78948a60602c4a6d9d8\n`;
 
-    const data = await wooacryResp.json();
+    const sign = crypto.createHash("md5").update(signatureString).digest("hex");
 
-    if (data.code !== 0) {
-      return res.status(500).json({
-        error: "Wooacry customize/info failed",
-        wooacry: data
-      });
+    const infoResp = await fetch("https://api-new.wooacry.com/api/reseller/open/customize/info", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Reseller-Flag": "characterhub",
+        "Timestamp": timestamp,
+        "Version": "1",
+        "Sign": sign
+      },
+      body: bodyJSON
+    });
+
+    const info = await infoResp.json();
+
+    if (!info || info.code !== 0) {
+      return res.status(500).json({ error: "Wooacry customize/info failed", info });
     }
 
-    const skuId = data.data.sku.id.toString();
+    const mockups = info.data.render_images || [];
 
-    // 2. Map Wooacry SKU → Shopify Variant
-    const shopifyVariantId = SKU_TO_VARIANT[skuId];
+    // 2. SEND ALL MOCKUPS AS CART LINE ITEM PROPERTIES
+    // Shopify will store these automatically on the order.
+    const props = encodeURIComponent(JSON.stringify(mockups));
 
-    if (!shopifyVariantId) {
-      return res.status(500).json({
-        error: "Missing SKU → Shopify Variant mapping",
-        skuId,
-        message: "Add this SKU to SKU_TO_VARIANT"
-      });
-    }
-
-    // 3. Redirect user to Shopify's ONLY supported property-add endpoint
     const redirectUrl =
-      `https://characterhub-merch-store.myshopify.com/cart/add` +
-      `?id=${shopifyVariantId}` +
-      `&quantity=1` +
-      `&properties[customize_no]=${encodeURIComponent(customize_no)}`;
+      `https://${SHOPIFY_STORE}.myshopify.com/cart?` +
+      `properties[customize_no]=${customize_no}` +
+      `&properties[mockups]=${props}`;
 
     return res.redirect(302, redirectUrl);
-
   } catch (err) {
     console.error("CALLBACK ERROR:", err);
     return res.status(500).json({ error: err.message });
