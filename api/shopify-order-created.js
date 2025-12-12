@@ -7,6 +7,7 @@ import { validateWooacryAddress } from "./wooacry-utils.js";
 const RESELLER_FLAG = "characterhub";
 const SECRET = "3710d71b1608f78948a60602c4a6d9d8";
 const WOOACRY_VERSION = "1";
+const SHOPIFY_STORE = "characterhub-merch-store";
 
 /* ----------------------------------------
    CLEAN JSON – removes undefined/null 
@@ -71,8 +72,14 @@ export default async function handler(req, res) {
     console.log("[SHOPIFY ORDER] Received:", order.id);
 
     const third_party_order_sn = String(order.id);
-    const createdAt = order.created_at || order.processed_at || new Date().toISOString();
-    const third_party_order_created_at = Math.floor(new Date(createdAt).getTime() / 1000);
+    const createdAt =
+      order.created_at ||
+      order.processed_at ||
+      new Date().toISOString();
+
+    const third_party_order_created_at = Math.floor(
+      new Date(createdAt).getTime() / 1000
+    );
     const third_party_user = order.email || "guest";
 
     const addr = order.shipping_address;
@@ -130,7 +137,7 @@ export default async function handler(req, res) {
     }
 
     /* ----------------------------------------
-       CALL /customize/info (for each customize_no)
+       CALL /customize/info
     ---------------------------------------- */
     let customizeInfoList = [];
 
@@ -181,7 +188,8 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Preorder failed", details: preJSON });
     }
 
-    const shipping_method_id = preJSON.data.shipping_methods[0].id;
+    const shipping_method_id =
+      preJSON.data.shipping_methods[0].id;
 
     /* ----------------------------------------
        STEP 2: CREATE MANUFACTURING ORDER
@@ -224,6 +232,43 @@ export default async function handler(req, res) {
       });
     }
 
+    /* ============================================================
+       SAVE MOCKUPS INTO SHOPIFY ORDER METAFIELD
+    ============================================================ */
+    try {
+      const mockups = customizeInfoList
+        .flatMap((entry) => entry.render_images || [])
+        .filter(Boolean);
+
+      if (mockups.length > 0) {
+        console.log("[MOCKUPS → METAFIELD]", mockups);
+
+        await fetch(
+          `https://${SHOPIFY_STORE}.myshopify.com/admin/api/2024-01/orders/${order.id}/metafields.json`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_API_TOKEN
+            },
+            body: JSON.stringify({
+              metafield: {
+                namespace: "wooacry",
+                key: "mockup_images",
+                type: "json",
+                value: JSON.stringify(mockups)
+              }
+            })
+          }
+        );
+      }
+    } catch (err) {
+      console.error("[SHOPIFY METAFIELD ERROR]", err);
+    }
+
+    /* ----------------------------------------
+       SUCCESS
+    ---------------------------------------- */
     return res.status(200).json({
       ok: true,
       wooacry_order_sn: createJSON.data.order_sn,
