@@ -1,19 +1,18 @@
-// api/wooacry-shipping-webhook.js
-
 /**
- * Wooacry -> Shopify Shipping Webhook Handler
+ * api/wooacry-shipping-webhook.js
  *
- * Wooacry "Shipping Notice" (per their API doc):
- * - Request Method: POST
- * - Partner provides the request URL
- * - Payload includes:
- *   - third_party_order_sn (this is what WE sent when creating the order; we use Shopify order.id)
- *   - express: { express_number, express_company_name, shipping_status, traces... }
+ * Wooacry -> Shopify Shipping Notice callback
  *
- * Wooacry "Response Example" shows:
- * { "data": {}, "code": 0 }
+ * Responsibilities:
+ * 1) Validate payload contains third_party_order_sn
+ * 2) Find Shopify order by ID (third_party_order_sn must be Shopify order.id or contain it)
+ * 3) Fetch fulfillment orders for the order
+ * 4) If no fulfillment exists, create fulfillment with tracking
+ * 5) If fulfillment exists, update tracking
  *
- * So we return that on success.
+ * Notes:
+ * - Shopify "create fulfillment" commonly requires fulfillment_order_line_items (ids + quantities)
+ * - Do NOT rely on order.fulfillment_orders being present on /orders/{id}.json
  */
 
 const SHOPIFY_STORE = "characterhub-merch-store";
@@ -21,33 +20,20 @@ const SHOPIFY_API_VERSION = "2024-01";
 const SHOPIFY_ADMIN_API = `https://${SHOPIFY_STORE}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`;
 const SHOPIFY_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
 
-// Wooacry shipping_status mapping per their doc
-const SHIPPING_STATUS_MAP = {
-  1: "awaiting_pickup",
-  2: "delivery_suspended",
-  10: "picked_up",
-  15: "in_transit",
-  20: "out_for_delivery",
-  25: "delivered",
-  30: "returned",
-  35: "lost",
-  40: "undeliverable",
-  45: "rejected",
-  50: "returned_to_sender"
-};
+// Optional: protect this endpoint so random people cannot spoof tracking updates.
+const WOOACRY_WEBHOOK_SECRET = process.env.WOOACRY_WEBHOOK_SECRET;
 
-function okResponse(res) {
-  return res.status(200).json({ data: {}, code: 0 });
-}
+function extractShopifyOrderId(thirdPartyOrderSn) {
+  if (!thirdPartyOrderSn) return null;
 
-function errorResponse(res, httpStatus, message, extra = {}) {
-  // Non-200 helps Wooacry retry if they do retries on failure.
-  return res.status(httpStatus).json({
-    data: {},
-    code: 1,
-    message,
-    ...extra
-  });
+  // Accept:
+  // - "1234567890"
+  // - "#1001 (1234567890)" style
+  // - "gid://shopify/Order/1234567890"
+  const match = String(thirdPartyOrderSn).match(/(\d{6,})/);
+  if (!match) return null;
+
+  return match[1];
 }
 
 async function shopifyFetch(path, options = {}) {
@@ -64,381 +50,204 @@ async function shopifyFetch(path, options = {}) {
   let json = null;
   try {
     json = text ? JSON.parse(text) : null;
-  } catch (e) {
-    // keep raw
+  } catch {
+    // leave json null
   }
 
-  return { resp, text, json };
-}
-
-async function getOrder(orderId) {
-  const { resp, json, text } = await shopifyFetch(`/orders/${orderId}.json`, {
-    method: "GET"
-  });
-
-  if (!resp.ok || !json?.order) {
-    throw new Error(
-      `Failed to load Shopify order ${orderId}. HTTP ${resp.status}. Body: ${text?.slice(0, 500)}`
+  if (!resp.ok) {
+    const err = new Error(
+      `Shopify API error ${resp.status} on ${path}: ${text || resp.statusText}`
     );
+    err.status = resp.status;
+    err.details = json || text;
+    throw err;
   }
 
-  return json.order;
+  return json;
 }
 
-async function getFulfillmentOrders(orderId) {
-  const { resp, json, text } = await shopifyFetch(
-    `/orders/${orderId}/fulfillment_orders.json`,
-    { method: "GET" }
-  );
-
-  if (!resp.ok || !json?.fulfillment_orders) {
-    throw new Error(
-      `Failed to load fulfillment_orders for order ${orderId}. HTTP ${resp.status}. Body: ${text?.slice(0, 500)}`
-    );
+function normalizeWooacryBody(req) {
+  // Next.js usually parses JSON already. But we guard anyway.
+  if (!req.body) return {};
+  if (typeof req.body === "object") return req.body;
+  try {
+    return JSON.parse(req.body);
+  } catch {
+    return {};
   }
-
-  return json.fulfillment_orders;
-}
-
-function findBestExistingFulfillment(order, trackingNumber) {
-  const fulfillments = Array.isArray(order.fulfillments) ? order.fulfillments : [];
-  const active = fulfillments.filter((f) => f.status !== "cancelled");
-
-  if (active.length === 0) return null;
-
-  if (trackingNumber) {
-    // Shopify can store tracking_number as string and/or tracking_numbers array
-    const match = active.find((f) => {
-      const tn = f.tracking_number;
-      const tns = Array.isArray(f.tracking_numbers) ? f.tracking_numbers : [];
-      return tn === trackingNumber || tns.includes(trackingNumber);
-    });
-    if (match) return match;
-  }
-
-  // If there is one active fulfillment, update that.
-  if (active.length === 1) return active[0];
-
-  // Otherwise pick the most recent active fulfillment
-  return active[0];
-}
-
-async function createFulfillment(orderId, trackingInfo, notifyCustomer) {
-  const fulfillmentOrders = await getFulfillmentOrders(orderId);
-
-  // Prefer open fulfillment orders
-  const openFOs = fulfillmentOrders.filter(
-    (fo) => fo.status !== "closed" && fo.status !== "cancelled"
-  );
-
-  const targetFOs = openFOs.length > 0 ? openFOs : fulfillmentOrders;
-
-  if (targetFOs.length === 0) {
-    throw new Error(`No fulfillment orders available for Shopify order ${orderId}`);
-  }
-
-  const payload = {
-    fulfillment: {
-      notify_customer: !!notifyCustomer,
-      tracking_info: trackingInfo,
-      line_items_by_fulfillment_order: targetFOs.map((fo) => ({
-        fulfillment_order_id: fo.id
-      }))
-    }
-  };
-
-  const { resp, json, text } = await shopifyFetch(`/fulfillments.json`, {
-    method: "POST",
-    body: JSON.stringify(payload)
-  });
-
-  if (!resp.ok || !json?.fulfillment) {
-    throw new Error(
-      `Failed to create fulfillment. HTTP ${resp.status}. Body: ${text?.slice(0, 800)}`
-    );
-  }
-
-  return json.fulfillment;
-}
-
-async function updateFulfillment(fulfillmentId, trackingInfo, notifyCustomer) {
-  const payload = {
-    fulfillment: {
-      notify_customer: !!notifyCustomer,
-      tracking_info: trackingInfo
-    }
-  };
-
-  const { resp, json, text } = await shopifyFetch(`/fulfillments/${fulfillmentId}.json`, {
-    method: "PUT",
-    body: JSON.stringify(payload)
-  });
-
-  if (!resp.ok || !json?.fulfillment) {
-    throw new Error(
-      `Failed to update fulfillment ${fulfillmentId}. HTTP ${resp.status}. Body: ${text?.slice(0, 800)}`
-    );
-  }
-
-  return json.fulfillment;
 }
 
 export default async function handler(req, res) {
-  // Wooacry Shipping Notice is POST
-  if (req.method !== "POST") {
-    return errorResponse(res, 405, "Method Not Allowed. Use POST.");
-  }
-
-  if (!SHOPIFY_TOKEN) {
-    return errorResponse(res, 500, "Missing SHOPIFY_ADMIN_API_TOKEN env var.");
-  }
-
   try {
-    const body = req.body || {};
-
-    console.log("[WOOACRY SHIPPING WEBHOOK RECEIVED]", JSON.stringify(body));
-
-    const thirdPartyOrderSn = body.third_party_order_sn;
-
-    if (!thirdPartyOrderSn || String(thirdPartyOrderSn).trim() === "") {
-      return errorResponse(res, 400, "Missing third_party_order_sn");
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
     }
 
-    // We set third_party_order_sn = Shopify order.id (numeric). Use it directly.
-    const shopifyOrderId = String(thirdPartyOrderSn).replace(/[^0-9]/g, "");
-
-    if (!shopifyOrderId) {
-      return errorResponse(res, 400, "third_party_order_sn did not contain a valid Shopify order id", {
-        third_party_order_sn: thirdPartyOrderSn
-      });
+    if (!SHOPIFY_TOKEN) {
+      return res.status(500).json({ error: "Missing SHOPIFY_ADMIN_API_TOKEN" });
     }
 
-    const express = body.express || {};
-    const trackingNumber = express.express_number || null;
+    // Optional shared secret check (recommended)
+    if (WOOACRY_WEBHOOK_SECRET) {
+      const provided =
+        req.headers["x-wooacry-secret"] ||
+        req.headers["x-webhook-secret"] ||
+        req.query.secret;
 
-    // Wooacry provides both express_company and express_company_name in examples
-    const trackingCompany =
-      express.express_company_name ||
-      express.express_company ||
-      "Carrier";
-
-    // You do not get a guaranteed carrier URL from Wooacry, so use a universal tracker.
-    const trackingUrl = trackingNumber
-      ? `https://t.17track.net/en#nums=${encodeURIComponent(trackingNumber)}`
-      : null;
-
-    const shippingStatusCode = Number(express.shipping_status);
-    const shippingStatus =
-      SHIPPING_STATUS_MAP[shippingStatusCode] || "in_transit";
-
-    console.log("[WOOACRY SHIPPING]", {
-      shopifyOrderId,
-      trackingNumber,
-      trackingCompany,
-      trackingUrl,
-      shippingStatusCode,
-      shippingStatus
-    });
-
-    // If Wooacry has not assigned a tracking number yet, do NOT create a Shopify fulfillment.
-    // This avoids "fulfilled" orders with no tracking.
-    if (!trackingNumber) {
-      console.log("[WOOACRY SHIPPING] No tracking number yet. Acknowledging without fulfillment.");
-      return okResponse(res);
+      if (String(provided || "") !== String(WOOACRY_WEBHOOK_SECRET)) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
     }
 
-    // Load Shopify order
-    const order = await getOrder(shopifyOrderId);
+    const body = normalizeWooacryBody(req);
 
-    const trackingInfo = {
-      number: trackingNumber,
-      company: trackingCompany,
-      url: trackingUrl
-    };
-
-    // If fulfillment exists, update it. Otherwise create.
-    const existingFulfillment = findBestExistingFulfillment(order, trackingNumber);
-
-    if (!existingFulfillment) {
-      console.log("[FULFILLMENT] None exists. Creating new fulfillment.");
-      await createFulfillment(shopifyOrderId, trackingInfo, true);
-      return okResponse(res);
-    }
-
-    console.log("[FULFILLMENT] Exists. Updating fulfillment:", existingFulfillment.id);
-    await updateFulfillment(existingFulfillment.id, trackingInfo, true);
-
-    return okResponse(res);
-  } catch (err) {
-    console.error("[WOOACRY SHIPPING WEBHOOK ERROR]", err);
-    return errorResponse(res, 500, err.message);
-  }
-}
-/**
- * Wooacry → Shopify Shipping Webhook Handler
- *
- * Wooacry calls this endpoint whenever:
- * - A package is created
- * - A tracking number is assigned
- * - A shipping status is updated
- *
- * This webhook will:
- * 1. Look up the Shopify order by Wooacry's `third_party_order_sn`
- * 2. Create a fulfillment if none exists
- * 3. Update fulfillment tracking if it already exists
- * 4. Notify customer via Shopify email
- */
-
-const SHOPIFY_STORE = "characterhub-merch-store";
-const SHOPIFY_API_VERSION = "2024-01";
-const SHOPIFY_ADMIN_API = `https://${SHOPIFY_STORE}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`;
-const SHOPIFY_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
-
-// Optional mapping Wooacry status → human readable status
-const STATUS_MAP = {
-  1: "pending",
-  10: "in_transit",
-  15: "in_transit",
-  20: "out_for_delivery",
-  25: "delivered",
-  30: "returned",
-  35: "lost",
-  40: "undeliverable",
-  45: "rejected",
-  50: "returned_to_sender"
-};
-
-export default async function handler(req, res) {
-  try {
-    const body = req.body;
-
-    console.log("[WOOACRY SHIPPING WEBHOOK RECEIVED]", body);
+    console.log("[WOOACRY SHIPPING NOTICE RECEIVED]", JSON.stringify(body));
 
     if (!body || !body.third_party_order_sn) {
       return res.status(400).json({ error: "Missing third_party_order_sn" });
     }
 
-    // Shopify order number is numeric
-    const shopifyOrderId = body.third_party_order_sn.replace(/[^0-9]/g, "");
-    const express = body.express || {};
-
-    const tracking_number = express.express_number || null;
-    const tracking_company = express.express_company_name || "Carrier";
-    const tracking_url = tracking_number
-      ? `https://t.17track.net/en#nums=${tracking_number}`
-      : null;
-
-    const shipping_status = STATUS_MAP[express.shipping_status] || "in_transit";
-
-    // ------------------------------------------------------------------
-    // STEP 1: Load Shopify Order
-    // ------------------------------------------------------------------
-    const orderResp = await fetch(
-      `${SHOPIFY_ADMIN_API}/orders/${shopifyOrderId}.json`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_TOKEN,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    const orderData = await orderResp.json();
-
-    if (!orderData || !orderData.order) {
-      console.error("[ERROR] Shopify order not found:", shopifyOrderId);
-      return res.status(404).json({ error: "Shopify order not found" });
+    const orderId = extractShopifyOrderId(body.third_party_order_sn);
+    if (!orderId) {
+      return res.status(400).json({
+        error:
+          "third_party_order_sn did not contain a Shopify order id. It must be Shopify order.id (numeric) or include it."
+      });
     }
 
-    const order = orderData.order;
+    const express = body.express || {};
+    const trackingNumber = express.express_number || "";
+    const trackingCompany =
+      express.express_company_name || express.express_company || "Carrier";
 
-    // If fulfillment exists, update it
+    // If Wooacry doesn't provide a direct tracking URL, give a universal one
+    const trackingUrl = trackingNumber
+      ? `https://t.17track.net/en#nums=${encodeURIComponent(trackingNumber)}`
+      : "";
+
+    // 1) Load order
+    const orderData = await shopifyFetch(`/orders/${orderId}.json`);
+    const order = orderData?.order;
+    if (!order) {
+      return res.status(404).json({ error: "Shopify order not found", orderId });
+    }
+
+    // 2) Get fulfillment orders (required for creating a fulfillment reliably)
+    const foData = await shopifyFetch(
+      `/orders/${orderId}/fulfillment_orders.json`
+    );
+
+    const fulfillmentOrders = foData?.fulfillment_orders || [];
+    const openFulfillmentOrders = fulfillmentOrders.filter((fo) => {
+      const status = String(fo.status || "").toLowerCase();
+      return status !== "closed" && status !== "cancelled";
+    });
+
+    if (openFulfillmentOrders.length === 0) {
+      // Could already be fulfilled/cancelled, or nothing fulfillable.
+      console.log("[WOOACRY SHIPPING] No open fulfillment orders", {
+        orderId,
+        fulfillmentOrdersCount: fulfillmentOrders.length
+      });
+      return res.status(200).json({
+        ok: true,
+        action: "noop",
+        reason: "No open fulfillment orders",
+        orderId
+      });
+    }
+
+    // 3) Get existing fulfillments on order
     const existingFulfillment =
-      order.fulfillments?.find((f) => f.status !== "cancelled") || null;
+      (order.fulfillments || []).find((f) => f.status !== "cancelled") || null;
 
-    // ------------------------------------------------------------------
-    // STEP 2A: Create a New Fulfillment
-    // ------------------------------------------------------------------
+    const tracking_info = {
+      number: trackingNumber || null,
+      company: trackingCompany || null,
+      url: trackingUrl || null
+    };
+
+    // Build the required line_items_by_fulfillment_order payload with line item ids
+    const line_items_by_fulfillment_order = openFulfillmentOrders.map((fo) => ({
+      fulfillment_order_id: fo.id,
+      fulfillment_order_line_items: (fo.line_items || []).map((li) => ({
+        id: li.id,
+        quantity: li.quantity
+      }))
+    }));
+
+    // 4A) Create fulfillment if none exists
     if (!existingFulfillment) {
-      console.log("[FULFILLMENT] None exists → creating new fulfillment");
+      console.log("[FULFILLMENT] None exists. Creating fulfillment.", {
+        orderId,
+        trackingNumber
+      });
+
+      // Some shops require location_id. Use assigned_location_id when present.
+      const locationId =
+        openFulfillmentOrders[0]?.assigned_location_id ||
+        openFulfillmentOrders[0]?.assigned_location?.location_id ||
+        null;
 
       const payload = {
         fulfillment: {
           notify_customer: true,
-          tracking_info: {
-            number: tracking_number,
-            company: tracking_company,
-            url: tracking_url
-          },
-          line_items_by_fulfillment_order: order.fulfillment_orders.map((fo) => ({
-            fulfillment_order_id: fo.id
-          }))
+          tracking_info,
+          line_items_by_fulfillment_order,
+          ...(locationId ? { location_id: locationId } : {})
         }
       };
 
-      const createResp = await fetch(
-        `${SHOPIFY_ADMIN_API}/fulfillments.json`,
-        {
-          method: "POST",
-          headers: {
-            "X-Shopify-Access-Token": SHOPIFY_TOKEN,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(payload)
-        }
-      );
+      const created = await shopifyFetch(`/fulfillments.json`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
 
-      const createJSON = await createResp.json();
-      console.log("[FULFILLMENT CREATED]", createJSON);
+      console.log("[FULFILLMENT CREATED]", JSON.stringify(created));
 
       return res.status(200).json({
         ok: true,
         action: "created",
-        status: shipping_status,
-        data: createJSON
+        orderId,
+        fulfillment_id: created?.fulfillment?.id || null
       });
     }
 
-    // ------------------------------------------------------------------
-    // STEP 2B: Update Existing Fulfillment
-    // ------------------------------------------------------------------
-    console.log("[FULFILLMENT] Exists → updating fulfillment");
+    // 4B) Update existing fulfillment tracking
+    console.log("[FULFILLMENT] Exists. Updating tracking.", {
+      orderId,
+      fulfillmentId: existingFulfillment.id,
+      trackingNumber
+    });
 
-    const payload = {
+    const updatePayload = {
       fulfillment: {
         notify_customer: true,
-        tracking_info: {
-          number: tracking_number,
-          company: tracking_company,
-          url: tracking_url
-        }
+        tracking_info
       }
     };
 
-    const updateResp = await fetch(
-      `${SHOPIFY_ADMIN_API}/fulfillments/${existingFulfillment.id}.json`,
+    const updated = await shopifyFetch(
+      `/fulfillments/${existingFulfillment.id}.json`,
       {
         method: "PUT",
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_TOKEN,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(updatePayload)
       }
     );
 
-    const updateJSON = await updateResp.json();
-    console.log("[FULFILLMENT UPDATED]", updateJSON);
+    console.log("[FULFILLMENT UPDATED]", JSON.stringify(updated));
 
     return res.status(200).json({
       ok: true,
       action: "updated",
-      status: shipping_status,
-      data: updateJSON
+      orderId,
+      fulfillment_id: existingFulfillment.id
     });
-
   } catch (err) {
     console.error("[WOOACRY SHIPPING WEBHOOK ERROR]", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(err.status || 500).json({
+      error: err.message || "Server error",
+      details: err.details || null
+    });
   }
 }
