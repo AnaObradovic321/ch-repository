@@ -5,8 +5,6 @@ const SECRET = process.env.WOOACRY_SECRET || "3710d71b1608f78948a60602c4a6d9d8";
 const VERSION = process.env.WOOACRY_VERSION || "1";
 const SHOP = process.env.SHOPIFY_SHOP_HANDLE || "characterhub-merch-store";
 
-const BUILD_ID = "wooacry-callback-2025-12-14-v1";
-
 function signRequest(bodyString, timestamp) {
   const sigString =
     `${RESELLER_FLAG}\n` +
@@ -19,29 +17,25 @@ function signRequest(bodyString, timestamp) {
 }
 
 export default async function handler(req, res) {
-  // Prevent caching (helps avoid weird stale behavior)
   res.setHeader("Cache-Control", "no-store");
-  res.setHeader("X-CH-Build", BUILD_ID);
 
   const { customize_no, variant_id, debug } = req.query;
 
   if (!customize_no) {
-    return res.status(400).json({ error: "Missing customize_no", build: BUILD_ID });
+    return res.status(400).json({ error: "Missing customize_no" });
   }
+
   if (!variant_id) {
     return res.status(400).json({
       error: "Missing variant_id",
-      build: BUILD_ID,
       how_to_fix:
-        "Make sure api/wooacry-customize-init builds redirect_url like: /api/wooacry-callback?variant_id=YOUR_SHOPIFY_VARIANT_ID"
+        "wooacry-customize-init must build redirect_url like /api/wooacry-callback?variant_id=SHOPIFY_VARIANT_ID"
     });
   }
 
   try {
-    // 1) Fetch customize info (for mockups)
-    const bodyObj = { customize_no: String(customize_no) };
-    const bodyJSON = JSON.stringify(bodyObj);
-
+    // 1) Call Wooacry customize/info to get mockups
+    const bodyJSON = JSON.stringify({ customize_no: String(customize_no) });
     const timestamp = Math.floor(Date.now() / 1000);
     const sign = signRequest(bodyJSON, timestamp);
 
@@ -67,7 +61,6 @@ export default async function handler(req, res) {
     } catch {
       return res.status(502).json({
         error: "Wooacry returned non-JSON for customize/info",
-        build: BUILD_ID,
         wooacry_http_status: infoResp.status,
         body_preview: text.slice(0, 500)
       });
@@ -76,47 +69,42 @@ export default async function handler(req, res) {
     if (!info || info.code !== 0) {
       return res.status(500).json({
         error: "Wooacry customize/info failed",
-        build: BUILD_ID,
         wooacry_http_status: infoResp.status,
         details: info
       });
     }
 
     const mockups = info?.data?.render_images || [];
-    const spuId = info?.data?.spu?.id; // internal, can change
-    const thirdPartSpu = info?.data?.spu?.third_part_spu; // partner-facing in their response shape
+    const m1 = mockups[0] || "";
+    const m2 = mockups[1] || "";
 
-    // Debug mode: lets you confirm deployment without redirecting
+    // Debug mode to verify what we received without redirecting
     if (String(debug) === "1") {
       return res.status(200).json({
         ok: true,
-        build: BUILD_ID,
         customize_no: String(customize_no),
         variant_id: String(variant_id),
-        wooacry_spu_id: spuId,
-        wooacry_third_part_spu: thirdPartSpu,
         mockups_count: mockups.length,
         mockups_preview: mockups.slice(0, 2)
       });
     }
 
-    // 2) Redirect into Shopify cart using Shopify variant_id (NOT Wooacry spu.id)
-    const safeVariantId = String(variant_id);
-    const m1 = mockups[0] ? encodeURIComponent(mockups[0]) : "";
-    const m2 = mockups[1] ? encodeURIComponent(mockups[1]) : "";
+    // 2) Use Shopify /cart/add (NOT /cart/<variant>:1) and only include non-empty properties
+    const params = new URLSearchParams();
+    params.set("id", String(variant_id));
+    params.set("quantity", "1");
+    params.set("properties[customize_no]", String(customize_no));
 
-    const redirectUrl =
-      `https://${SHOP}.myshopify.com/cart/${safeVariantId}:1` +
-      `?properties[customize_no]=${encodeURIComponent(String(customize_no))}` +
-      `&properties[mockup_1]=${m1}` +
-      `&properties[mockup_2]=${m2}`;
+    if (m1) params.set("properties[mockup_1]", m1);
+    if (m2) params.set("properties[mockup_2]", m2);
 
-    console.log("[wooacry-callback] build =", BUILD_ID);
-    console.log("[wooacry-callback] redirecting to Shopify cart:", redirectUrl);
+    const addUrl = `https://${SHOP}.myshopify.com/cart/add?${params.toString()}`;
 
-    return res.redirect(302, redirectUrl);
+    console.log("[wooacry-callback] Redirecting to Shopify cart/add:", addUrl);
+
+    return res.redirect(302, addUrl);
   } catch (err) {
     console.error("WOOACRY CALLBACK ERROR:", err);
-    return res.status(500).json({ error: err.message, build: BUILD_ID });
+    return res.status(500).json({ error: err.message });
   }
 }
