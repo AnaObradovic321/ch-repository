@@ -1,10 +1,3 @@
-// api/shopify-order-created.js
-//
-// Purpose (kid-simple):
-// Shopify tells us "an order was created".
-// We look for items that have customize_no.
-// If we find them, we ask Wooacry for shipping options, then create a Wooacry manufacturing order.
-// Finally we save Wooacry's order_sn into a Shopify metafield.
 
 import { buildHeaders, validateWooacryAddress } from "./wooacry-utils.js";
 
