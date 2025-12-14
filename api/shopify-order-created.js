@@ -1,4 +1,3 @@
-
 import { buildHeaders, validateWooacryAddress } from "./wooacry-utils.js";
 
 // Config
@@ -70,11 +69,14 @@ async function wooacryPreorder({ third_party_user, skus, address }) {
     address
   });
 
-  const resp = await fetch(`${WOOACRY_BASE}/api/reseller/open/order/create/pre`, {
-    method: "POST",
-    headers: buildHeaders(body),
-    body
-  });
+  const resp = await fetch(
+    `${WOOACRY_BASE}/api/reseller/open/order/create/pre`,
+    {
+      method: "POST",
+      headers: buildHeaders(body),
+      body
+    }
+  );
 
   const json = await resp.json();
   if (!json || json.code !== 0) {
@@ -117,25 +119,40 @@ async function wooacryCreateOrder({
   return json;
 }
 
-async function getExistingWooacryMetafield(orderId) {
-  if (!SHOPIFY_ADMIN_API_TOKEN) return null;
+async function getWooacryMetafields(orderId) {
+  if (!SHOPIFY_ADMIN_API_TOKEN) return { order_sn: null, status: null };
 
-  const resp = await fetch(`${SHOPIFY_ADMIN_API}/orders/${orderId}/metafields.json`, {
-    headers: {
-      "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
-      "Content-Type": "application/json"
+  const resp = await fetch(
+    `${SHOPIFY_ADMIN_API}/orders/${orderId}/metafields.json`,
+    {
+      headers: {
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
+        "Content-Type": "application/json"
+      }
     }
-  });
+  );
 
   const json = await resp.json();
   const list = json?.metafields || [];
-  const hit = list.find((m) => m.namespace === "wooacry" && m.key === "order_sn");
-  return hit || null;
+
+  const orderSn = list.find(
+    (m) => m.namespace === "wooacry" && m.key === "order_sn"
+  );
+  const status = list.find(
+    (m) => m.namespace === "wooacry" && m.key === "status"
+  );
+
+  return {
+    order_sn: orderSn?.value ?? null,
+    status: status?.value ?? null
+  };
 }
 
 async function saveWooacryOrderSnMetafield(orderId, wooacryOrderSn) {
   if (!SHOPIFY_ADMIN_API_TOKEN) {
-    console.log("[shopify-order-created] Missing SHOPIFY_ADMIN_API_TOKEN, skipping metafield save");
+    console.log(
+      "[shopify-order-created] Missing SHOPIFY_ADMIN_API_TOKEN, skipping metafield save"
+    );
     return;
   }
 
@@ -158,26 +175,72 @@ async function saveWooacryOrderSnMetafield(orderId, wooacryOrderSn) {
   });
 }
 
+async function saveWooacryStatusMetafield(orderId, statusText) {
+  if (!SHOPIFY_ADMIN_API_TOKEN) {
+    console.log(
+      "[shopify-order-created] Missing SHOPIFY_ADMIN_API_TOKEN, skipping status metafield save"
+    );
+    return;
+  }
+
+  const payload = {
+    metafield: {
+      namespace: "wooacry",
+      key: "status",
+      value: asString(statusText),
+      type: "single_line_text_field"
+    }
+  };
+
+  await fetch(`${SHOPIFY_ADMIN_API}/orders/${orderId}/metafields.json`, {
+    method: "POST",
+    headers: {
+      "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+}
+
 export default async function handler(req, res) {
   try {
     const order = req.body;
 
     if (!order || !order.id) {
-      return res.status(400).json({ error: "Invalid Shopify order webhook payload" });
+      return res
+        .status(400)
+        .json({ error: "Invalid Shopify order webhook payload" });
     }
 
     console.log("[shopify-order-created] New Shopify order:", order.id);
 
-    // Idempotency: if we already saved wooacry order_sn, do nothing
-    const existing = await getExistingWooacryMetafield(order.id);
-    if (existing?.value) {
-      console.log("[shopify-order-created] Wooacry already created for this order. order_sn:", existing.value);
-      return res.status(200).json({ ok: true, already_created: true, wooacry_order_sn: existing.value });
+    // Idempotency + backfill:
+    // If wooacry order_sn exists, do NOT create again.
+    // But still ensure wooacry.status exists.
+    const existingMeta = await getWooacryMetafields(order.id);
+    if (existingMeta.order_sn) {
+      if (!existingMeta.status) {
+        await saveWooacryStatusMetafield(order.id, "Production Started");
+      }
+
+      console.log(
+        "[shopify-order-created] Wooacry already created for this order. order_sn:",
+        existingMeta.order_sn
+      );
+      return res.status(200).json({
+        ok: true,
+        already_created: true,
+        wooacry_order_sn: existingMeta.order_sn,
+        status: existingMeta.status || "Production Started"
+      });
     }
 
     const third_party_order_sn = asString(order.id);
-    const createdAt = order.created_at || order.processed_at || new Date().toISOString();
-    const third_party_order_created_at = Math.floor(new Date(createdAt).getTime() / 1000);
+    const createdAt =
+      order.created_at || order.processed_at || new Date().toISOString();
+    const third_party_order_created_at = Math.floor(
+      new Date(createdAt).getTime() / 1000
+    );
 
     const third_party_user = asString(order.email).trim() || "guest";
 
@@ -195,7 +258,9 @@ export default async function handler(req, res) {
     }
 
     if (wooItems.length === 0) {
-      console.log("[shopify-order-created] No customize_no items found. Ignoring.");
+      console.log(
+        "[shopify-order-created] No customize_no items found. Ignoring."
+      );
       return res.status(200).json({ ok: true, skipped: true });
     }
 
@@ -210,7 +275,11 @@ export default async function handler(req, res) {
     const normalized = validateWooacryAddress({
       first_name: ship.first_name || "",
       last_name: ship.last_name || "",
-      phone: ship.phone || order.phone || (order.billing_address && order.billing_address.phone) || "",
+      phone:
+        ship.phone ||
+        order.phone ||
+        (order.billing_address && order.billing_address.phone) ||
+        "",
       country_code: (ship.country_code || "").toUpperCase(),
       province: ship.province || "",
       city: ship.city || "",
@@ -250,9 +319,13 @@ export default async function handler(req, res) {
       await saveWooacryOrderSnMetafield(order.id, wooacry_order_sn);
     }
 
+    // 6) Save initial Wooacry status into Shopify metafield
+    await saveWooacryStatusMetafield(order.id, "Production Started");
+
     return res.status(200).json({
       ok: true,
       wooacry_order_sn,
+      status: "Production Started",
       wooacry_create_response: createJSON
     });
   } catch (err) {
