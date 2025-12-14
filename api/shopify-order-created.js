@@ -8,13 +8,14 @@ const SHOPIFY_STORE =
   process.env.SHOPIFY_STORE_HANDLE || "characterhub-merch-store";
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-01";
 
-// IMPORTANT: Your shipping webhook uses SHOPIFY_ADMIN_API_TOKEN.
-// Your old code used SHOPIFY_TOKEN.
-// This supports both so you do not get stuck.
+// Supports both env var names so you don't get stuck
 const SHOPIFY_ADMIN_API_TOKEN =
   process.env.SHOPIFY_ADMIN_API_TOKEN || process.env.SHOPIFY_TOKEN;
 
 const SHOPIFY_ADMIN_API = `https://${SHOPIFY_STORE}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`;
+
+// Safe testing toggle
+const WOOACRY_DRY_RUN = String(process.env.WOOACRY_DRY_RUN || "").trim() === "1";
 
 const TAX_REQUIRED_COUNTRIES = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
 
@@ -57,26 +58,18 @@ function pickCheapestShippingMethod(preJSON) {
     throw new Error("Wooacry preorder returned no shipping_methods");
   }
 
-  // postal_amount might be number or string, force Number()
   methods.sort((a, b) => Number(a.postal_amount) - Number(b.postal_amount));
   return methods[0].id;
 }
 
 async function wooacryPreorder({ third_party_user, skus, address }) {
-  const body = JSON.stringify({
-    third_party_user,
-    skus,
-    address
-  });
+  const body = JSON.stringify({ third_party_user, skus, address });
 
-  const resp = await fetch(
-    `${WOOACRY_BASE}/api/reseller/open/order/create/pre`,
-    {
-      method: "POST",
-      headers: buildHeaders(body),
-      body
-    }
-  );
+  const resp = await fetch(`${WOOACRY_BASE}/api/reseller/open/order/create/pre`, {
+    method: "POST",
+    headers: buildHeaders(body),
+    body
+  });
 
   const json = await resp.json();
   if (!json || json.code !== 0) {
@@ -119,8 +112,8 @@ async function wooacryCreateOrder({
   return json;
 }
 
-async function getWooacryMetafields(orderId) {
-  if (!SHOPIFY_ADMIN_API_TOKEN) return { order_sn: null, status: null };
+async function listOrderMetafields(orderId) {
+  if (!SHOPIFY_ADMIN_API_TOKEN) return [];
 
   const resp = await fetch(
     `${SHOPIFY_ADMIN_API}/orders/${orderId}/metafields.json`,
@@ -133,39 +126,52 @@ async function getWooacryMetafields(orderId) {
   );
 
   const json = await resp.json();
-  const list = json?.metafields || [];
-
-  const orderSn = list.find(
-    (m) => m.namespace === "wooacry" && m.key === "order_sn"
-  );
-  const status = list.find(
-    (m) => m.namespace === "wooacry" && m.key === "status"
-  );
-
-  return {
-    order_sn: orderSn?.value ?? null,
-    status: status?.value ?? null
-  };
+  return json?.metafields || [];
 }
 
-async function saveWooacryOrderSnMetafield(orderId, wooacryOrderSn) {
+async function upsertOrderMetafield(orderId, namespace, key, value, type) {
   if (!SHOPIFY_ADMIN_API_TOKEN) {
-    console.log(
-      "[shopify-order-created] Missing SHOPIFY_ADMIN_API_TOKEN, skipping metafield save"
-    );
-    return;
+    console.log("[shopify-order-created] Missing SHOPIFY_ADMIN_API_TOKEN, skipping metafield upsert");
+    return null;
   }
 
+  const all = await listOrderMetafields(orderId);
+  const existing = all.find((m) => m.namespace === namespace && m.key === key);
+
+  if (existing?.id) {
+    // Update existing
+    const payload = {
+      metafield: {
+        id: existing.id,
+        value: asString(value),
+        type: type || existing.type || "single_line_text_field"
+      }
+    };
+
+    const resp = await fetch(`${SHOPIFY_ADMIN_API}/metafields/${existing.id}.json`, {
+      method: "PUT",
+      headers: {
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const json = await resp.json();
+    return json?.metafield || null;
+  }
+
+  // Create new
   const payload = {
     metafield: {
-      namespace: "wooacry",
-      key: "order_sn",
-      value: asString(wooacryOrderSn),
-      type: "single_line_text_field"
+      namespace,
+      key,
+      value: asString(value),
+      type: type || "single_line_text_field"
     }
   };
 
-  await fetch(`${SHOPIFY_ADMIN_API}/orders/${orderId}/metafields.json`, {
+  const resp = await fetch(`${SHOPIFY_ADMIN_API}/orders/${orderId}/metafields.json`, {
     method: "POST",
     headers: {
       "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
@@ -173,33 +179,9 @@ async function saveWooacryOrderSnMetafield(orderId, wooacryOrderSn) {
     },
     body: JSON.stringify(payload)
   });
-}
 
-async function saveWooacryStatusMetafield(orderId, statusText) {
-  if (!SHOPIFY_ADMIN_API_TOKEN) {
-    console.log(
-      "[shopify-order-created] Missing SHOPIFY_ADMIN_API_TOKEN, skipping status metafield save"
-    );
-    return;
-  }
-
-  const payload = {
-    metafield: {
-      namespace: "wooacry",
-      key: "status",
-      value: asString(statusText),
-      type: "single_line_text_field"
-    }
-  };
-
-  await fetch(`${SHOPIFY_ADMIN_API}/orders/${orderId}/metafields.json`, {
-    method: "POST",
-    headers: {
-      "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
+  const json = await resp.json();
+  return json?.metafield || null;
 }
 
 export default async function handler(req, res) {
@@ -207,46 +189,26 @@ export default async function handler(req, res) {
     const order = req.body;
 
     if (!order || !order.id) {
-      return res
-        .status(400)
-        .json({ error: "Invalid Shopify order webhook payload" });
+      return res.status(400).json({ error: "Invalid Shopify order webhook payload" });
     }
 
-    console.log("[shopify-order-created] New Shopify order:", order.id);
+    console.log("[shopify-order-created] New Shopify order:", order.id, "dry_run:", WOOACRY_DRY_RUN);
 
-    // Idempotency + backfill:
-    // If wooacry order_sn exists, do NOT create again.
-    // But still ensure wooacry.status exists.
-    const existingMeta = await getWooacryMetafields(order.id);
-    if (existingMeta.order_sn) {
-      if (!existingMeta.status) {
-        await saveWooacryStatusMetafield(order.id, "Production Started");
-      }
-
-      console.log(
-        "[shopify-order-created] Wooacry already created for this order. order_sn:",
-        existingMeta.order_sn
-      );
-      return res.status(200).json({
-        ok: true,
-        already_created: true,
-        wooacry_order_sn: existingMeta.order_sn,
-        status: existingMeta.status || "Production Started"
-      });
+    // Idempotency check: if wooacry.order_sn already exists, do nothing
+    const metafields = await listOrderMetafields(order.id);
+    const already = metafields.find((m) => m.namespace === "wooacry" && m.key === "order_sn");
+    if (already?.value) {
+      console.log("[shopify-order-created] Wooacry already created for this order. order_sn:", already.value);
+      return res.status(200).json({ ok: true, already_created: true, wooacry_order_sn: already.value });
     }
 
     const third_party_order_sn = asString(order.id);
-    const createdAt =
-      order.created_at || order.processed_at || new Date().toISOString();
-    const third_party_order_created_at = Math.floor(
-      new Date(createdAt).getTime() / 1000
-    );
-
+    const createdAt = order.created_at || order.processed_at || new Date().toISOString();
+    const third_party_order_created_at = Math.floor(new Date(createdAt).getTime() / 1000);
     const third_party_user = asString(order.email).trim() || "guest";
 
     // 1) Find Wooacry items from line item properties
     const wooItems = [];
-
     for (const item of order.line_items || []) {
       const customize_no = getLineItemProperty(item, "customize_no");
       if (customize_no) {
@@ -258,9 +220,7 @@ export default async function handler(req, res) {
     }
 
     if (wooItems.length === 0) {
-      console.log(
-        "[shopify-order-created] No customize_no items found. Ignoring."
-      );
+      console.log("[shopify-order-created] No customize_no items found. Ignoring.");
       return res.status(200).json({ ok: true, skipped: true });
     }
 
@@ -286,12 +246,22 @@ export default async function handler(req, res) {
       address1: ship.address1 || "",
       address2: ship.address2 || "",
       post_code: ship.zip || "",
-      // Shopify does not provide this normally unless you collect it yourself
       tax_number: ship.tax_number || ""
     });
 
-    // Wooacry requires tax_number for certain countries
     requireTaxNumberIfNeeded(normalized.country_code, normalized.tax_number);
+
+    // DRY RUN: do not call Wooacry, but still write a status so you can verify the webhook fired
+    if (WOOACRY_DRY_RUN) {
+      await upsertOrderMetafield(order.id, "wooacry", "status", "DRY RUN: Production Started", "single_line_text_field");
+
+      return res.status(200).json({
+        ok: true,
+        dry_run: true,
+        woo_items: wooItems,
+        normalized_address: normalized
+      });
+    }
 
     // 3) Preorder to get shipping methods
     const preJSON = await wooacryPreorder({
@@ -314,18 +284,15 @@ export default async function handler(req, res) {
 
     const wooacry_order_sn = createJSON?.data?.order_sn;
 
-    // 5) Save Wooacry order_sn into Shopify metafield
+    // 5) Save Wooacry order_sn + status into Shopify metafields
     if (wooacry_order_sn) {
-      await saveWooacryOrderSnMetafield(order.id, wooacry_order_sn);
+      await upsertOrderMetafield(order.id, "wooacry", "order_sn", wooacry_order_sn, "single_line_text_field");
     }
-
-    // 6) Save initial Wooacry status into Shopify metafield
-    await saveWooacryStatusMetafield(order.id, "Production Started");
+    await upsertOrderMetafield(order.id, "wooacry", "status", "Production Started", "single_line_text_field");
 
     return res.status(200).json({
       ok: true,
       wooacry_order_sn,
-      status: "Production Started",
       wooacry_create_response: createJSON
     });
   } catch (err) {
