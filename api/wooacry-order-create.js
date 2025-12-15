@@ -1,41 +1,135 @@
 import { buildHeaders } from "./wooacry-utils.js";
 
 /**
- * Fetch Wooacry customize/info for validation
+ * Wooacry base domain (prod vs pre)
  */
-async function fetchCustomizeInfo(customize_no) {
-  const body = { customize_no };
-  const raw = JSON.stringify(body);
-
-  const response = await fetch(
-    "https://api-new.wooacry.com/api/reseller/open/customize/info",
-    {
-      method: "POST",
-      headers: buildHeaders(raw),
-      body: raw
-    }
-  );
-
-  const json = await response.json();
-  if (!json || !json.data) {
-    throw new Error("Failed to retrieve customize info from Wooacry");
-  }
-
-  return json.data; // Used only for SKU existence validation
-}
+const WOOACRY_BASE = process.env.WOOACRY_API_BASE || "https://api-new.wooacry.com";
 
 /**
- * Mandatory tax number rules by country
+ * Countries where tax_number must be present (Wooacry docs)
  */
-function validateTaxNumber(country_code, tax_number) {
-  const mustHaveTax = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
-  const cc = (country_code || "").toUpperCase();
+const TAX_REQUIRED_COUNTRIES = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
 
-  if (mustHaveTax.includes(cc)) {
-    if (!tax_number || tax_number.trim() === "") {
+/**
+ * Required address keys per Wooacry docs:
+ * Pre-order and Create order both mark address2 as required. :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}
+ *
+ * We require the keys to exist. We allow address2 + tax_number to be empty strings unless rules require otherwise.
+ */
+function validateAddress(address) {
+  if (!address || typeof address !== "object") {
+    throw new Error("Missing or invalid address");
+  }
+
+  const requiredKeys = [
+    "first_name",
+    "last_name",
+    "phone",
+    "country_code",
+    "province",
+    "city",
+    "address1",
+    "address2",
+    "post_code",
+    "tax_number"
+  ];
+
+  for (const k of requiredKeys) {
+    if (!(k in address)) {
+      throw new Error(`Address field missing: ${k}`);
+    }
+  }
+
+  // These must be non-empty
+  const mustBeNonEmpty = [
+    "first_name",
+    "last_name",
+    "phone",
+    "country_code",
+    "province",
+    "city",
+    "address1",
+    "post_code"
+  ];
+
+  for (const k of mustBeNonEmpty) {
+    if (!address[k] || String(address[k]).trim() === "") {
+      throw new Error(`Address field missing or empty: ${k}`);
+    }
+  }
+
+  // tax_number must be non-empty for certain countries
+  const cc = String(address.country_code).toUpperCase().trim();
+  if (TAX_REQUIRED_COUNTRIES.includes(cc)) {
+    if (!address.tax_number || String(address.tax_number).trim() === "") {
       throw new Error(`Missing required tax_number for ${cc}`);
     }
   }
+}
+
+/**
+ * Validate SKUs
+ * Docs show customize_no + count in examples. :contentReference[oaicite:4]{index=4}
+ */
+function validateSkus(skus) {
+  if (!Array.isArray(skus) || skus.length === 0) {
+    throw new Error("Missing or invalid skus");
+  }
+
+  for (const sku of skus) {
+    if (!sku || typeof sku !== "object") throw new Error("Invalid sku entry");
+
+    if (!sku.customize_no || typeof sku.customize_no !== "string") {
+      throw new Error("SKU missing customize_no");
+    }
+
+    const count = Number(sku.count);
+    if (!Number.isFinite(count) || count <= 0) {
+      throw new Error(`Invalid count for customize_no ${sku.customize_no}`);
+    }
+  }
+}
+
+/**
+ * Safe JSON parse helper (Wooacry sometimes returns non-JSON on errors)
+ */
+async function readWooacryJson(response) {
+  const text = await response.text();
+  try {
+    return { ok: true, json: JSON.parse(text), raw: text };
+  } catch {
+    return { ok: false, json: null, raw: text };
+  }
+}
+
+/**
+ * Fetch Wooacry customize/info for validation (must succeed with code === 0)
+ */
+async function fetchCustomizeInfo(customize_no) {
+  const raw = JSON.stringify({ customize_no: String(customize_no) });
+
+  const response = await fetch(`${WOOACRY_BASE}/api/reseller/open/customize/info`, {
+    method: "POST",
+    headers: buildHeaders(raw),
+    body: raw
+  });
+
+  const parsed = await readWooacryJson(response);
+
+  if (!parsed.ok) {
+    throw new Error(
+      `Wooacry customize/info returned non-JSON (HTTP ${response.status}): ${parsed.raw.slice(0, 300)}`
+    );
+  }
+
+  const json = parsed.json;
+
+  // Wooacry common response: code=0 success :contentReference[oaicite:5]{index=5}
+  if (!json || json.code !== 0 || !json.data) {
+    throw new Error(`Wooacry customize/info failed: ${JSON.stringify(json).slice(0, 500)}`);
+  }
+
+  return json.data;
 }
 
 export default async function handler(req, res) {
@@ -51,86 +145,71 @@ export default async function handler(req, res) {
       shipping_method_id,
       skus,
       address
-    } = req.body;
+    } = req.body || {};
 
-    /**
-     * Validate required fields
-     */
-    if (
-      !third_party_order_sn ||
-      !third_party_order_created_at ||
-      !third_party_user ||
-      !shipping_method_id ||
-      !Array.isArray(skus) ||
-      skus.length === 0 ||
-      !address
-    ) {
-      return res.status(400).json({
-        error: "Missing required fields for Wooacry order-create"
-      });
+    // Required top-level fields per create-order docs :contentReference[oaicite:6]{index=6}
+    if (!third_party_order_sn || typeof third_party_order_sn !== "string") {
+      return res.status(400).json({ error: "Missing or invalid third_party_order_sn" });
     }
 
-    // Validate tax rules
-    validateTaxNumber(address.country_code, address.tax_number);
+    const createdAt = Number(third_party_order_created_at);
+    if (!Number.isInteger(createdAt) || createdAt <= 0) {
+      return res.status(400).json({ error: "Missing or invalid third_party_order_created_at (must be int seconds)" });
+    }
 
-    // Normalize address according to Wooacry documentation
+    if (!third_party_user || typeof third_party_user !== "string") {
+      return res.status(400).json({ error: "Missing or invalid third_party_user" });
+    }
+
+    if (!shipping_method_id || typeof shipping_method_id !== "string") {
+      return res.status(400).json({ error: "Missing or invalid shipping_method_id" });
+    }
+
+    try {
+      validateSkus(skus);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+
+    // Normalize address fields, keeping required keys present
     const wooacryAddress = {
-      first_name: address.first_name ?? "",
-      last_name: address.last_name ?? "",
-      phone: address.phone ?? "",
-      country_code: (address.country_code || "").toUpperCase(),
-      province: address.province ?? "",
-      city: address.city ?? "",
-      address1: address.address1 ?? "",
-      address2: address.address2 ?? "",
-      post_code: address.post_code ?? "",
-      tax_number: address.tax_number ?? ""
+      first_name: address?.first_name ?? "",
+      last_name: address?.last_name ?? "",
+      phone: address?.phone ?? "",
+      country_code: String(address?.country_code ?? "").toUpperCase().trim(),
+      province: address?.province ?? "",
+      city: address?.city ?? "",
+      address1: address?.address1 ?? "",
+      address2: address?.address2 ?? "", // required by docs, can be ""
+      post_code: address?.post_code ?? "",
+      tax_number: address?.tax_number ?? "" // required key, content required for specific countries
     };
 
-    /**
-     * Customize info cache to reduce API calls
-     */
-    const customizeCache = {};
+    try {
+      validateAddress(wooacryAddress);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
 
-    async function verifyCustomize(no) {
+    // Optional: verify customize_nos exist by calling customize/info
+    // Caches within request
+    const customizeCache = {};
+    for (const sku of skus) {
+      const no = sku.customize_no;
       if (!customizeCache[no]) {
         customizeCache[no] = await fetchCustomizeInfo(no);
       }
-      return customizeCache[no];
     }
 
-    /**
-     * Build SKUs for order-create
-     * IMPORTANT: Wooacry ONLY accepts:
-     * - customize_no
-     * - count
-     *
-     * DO NOT send sale_price or package_price.
-     */
-    const orderCreateSKUs = [];
+    // Build SKUs exactly as Wooacry expects for create order
+    const orderCreateSKUs = skus.map((s) => ({
+      customize_no: String(s.customize_no),
+      count: Number(s.count)
+    }));
 
-    for (const sku of skus) {
-      if (!sku.customize_no)
-        throw new Error("SKU missing customize_no");
-
-      if (!sku.count || sku.count <= 0)
-        throw new Error(`Invalid count for customize_no ${sku.customize_no}`);
-
-      // Validate the customize_no exists in Wooacry
-      await verifyCustomize(sku.customize_no);
-
-      orderCreateSKUs.push({
-        customize_no: sku.customize_no,
-        count: sku.count
-      });
-    }
-
-    /**
-     * Build final request body
-     */
     const body = {
       third_party_order_sn,
-      third_party_order_created_at,
+      third_party_order_created_at: createdAt,
       third_party_user,
       shipping_method_id,
       skus: orderCreateSKUs,
@@ -139,23 +218,23 @@ export default async function handler(req, res) {
 
     const raw = JSON.stringify(body);
 
-    /**
-     * Call Wooacry order/create API
-     */
-    const response = await fetch(
-      "https://api-new.wooacry.com/api/reseller/open/order/create",
-      {
-        method: "POST",
-        headers: buildHeaders(raw),
-        body: raw
-      }
-    );
+    const response = await fetch(`${WOOACRY_BASE}/api/reseller/open/order/create`, {
+      method: "POST",
+      headers: buildHeaders(raw),
+      body: raw
+    });
 
-    const result = await response.json();
-    console.log("Wooacry Final Order Response:", result);
+    const parsed = await readWooacryJson(response);
 
-    return res.status(200).json(result);
+    if (!parsed.ok) {
+      return res.status(502).json({
+        error: "Wooacry returned non-JSON for order/create",
+        wooacry_http_status: response.status,
+        body_preview: parsed.raw.slice(0, 800)
+      });
+    }
 
+    return res.status(200).json(parsed.json);
   } catch (err) {
     console.error("Wooacry Order Create ERROR:", err);
     return res.status(500).json({ error: err.message });
