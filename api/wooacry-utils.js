@@ -1,23 +1,33 @@
 import crypto from "crypto";
 
 /* ----------------------------------------
-   Wooacry Credentials
+   Wooacry Credentials (ENV ONLY)
 ---------------------------------------- */
-export const WOOACRY_RESELLER_FLAG = "characterhub";
-export const WOOACRY_SECRET = "3710d71b1608f78948a60602c4a6d9d8";
-export const WOOACRY_VERSION = "1";
+export const WOOACRY_RESELLER_FLAG =
+  process.env.WOOACRY_RESELLER_FLAG || "characterhub";
+
+export const WOOACRY_SECRET = process.env.WOOACRY_SECRET; // REQUIRED
+export const WOOACRY_VERSION = process.env.WOOACRY_VERSION || "1";
+
+function assertSecrets() {
+  if (!WOOACRY_SECRET) {
+    throw new Error("Missing WOOACRY_SECRET env var");
+  }
+}
 
 /* ----------------------------------------
-   Timestamp
+   Timestamp (seconds)
 ---------------------------------------- */
 export function generateTimestamp() {
   return Math.floor(Date.now() / 1000);
 }
 
 /* ----------------------------------------
-   MD5 Signature (5-line exact)
+   MD5 Signature (5-line exact per docs)
 ---------------------------------------- */
 export function buildSignature(rawBodyString, timestamp) {
+  assertSecrets();
+
   const signatureString =
     `${WOOACRY_RESELLER_FLAG}\n` +
     `${timestamp}\n` +
@@ -30,9 +40,16 @@ export function buildSignature(rawBodyString, timestamp) {
 
 /* ----------------------------------------
    Header builder
+   Pass timestamp if you want full control
 ---------------------------------------- */
-export function buildHeaders(rawBodyString) {
-  const timestamp = generateTimestamp();
+export function buildHeaders(rawBodyString, providedTimestamp) {
+  assertSecrets();
+
+  const timestamp =
+    typeof providedTimestamp === "number"
+      ? providedTimestamp
+      : generateTimestamp();
+
   const sign = buildSignature(rawBodyString, timestamp);
 
   return {
@@ -68,24 +85,24 @@ export const WOOACRY_COUNTRY_CODES = new Set([
 ]);
 
 /* ----------------------------------------
-   Address Validator (SAFEST VERSION)
+   Address Normalizer (STRICT)
+   Do NOT silently change country, that breaks shipping quotes.
 ---------------------------------------- */
 export function validateWooacryAddress(address) {
   if (!address || typeof address !== "object") {
     throw new Error("Invalid address object: must be an object");
   }
 
-  // Normalize
   const code = (address.country_code || "").toUpperCase().trim();
-
-  // If Wooacry does not recognize the code → fallback to US (safe default)
-  const finalCode = WOOACRY_COUNTRY_CODES.has(code) ? code : "US";
+  if (!WOOACRY_COUNTRY_CODES.has(code)) {
+    throw new Error(`Invalid country_code: ${code || "(empty)"}`);
+  }
 
   return {
     first_name: address.first_name || "",
     last_name: address.last_name || "",
     phone: address.phone || "",
-    country_code: finalCode,
+    country_code: code,
     province: address.province || "",
     city: address.city || "",
     address1: address.address1 || "",
