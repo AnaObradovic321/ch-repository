@@ -1,153 +1,72 @@
-// api/wooacry-preorder.js
-import { buildHeaders } from "./wooacry-utils.js";
+import {
+  WOOACRY_API_BASE,
+  buildHeaders,
+  normalizeWooacryAddress,
+  readWooacryJson
+} from "./wooacry-utils.js";
 
-// Countries where tax_number must be present (Wooacry list)
-const TAX_REQUIRED_COUNTRIES = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
-
-/**
- * Validate Wooacry address according to documentation.
- * Note: docs list address2 + tax_number as required fields to be present,
- * but tax_number is mandatory (non-empty) only for specific countries.
- */
-function validateAddress(address) {
-  if (!address || typeof address !== "object") {
-    throw new Error("Missing or invalid address");
-  }
-
-  // Required fields per Wooacry pre-order docs
-  const requiredFields = [
-    "first_name",
-    "last_name",
-    "phone",
-    "country_code",
-    "province",
-    "city",
-    "address1",
-    "address2",   // required by docs (can be empty string)
-    "post_code",
-    "tax_number"  // required by docs (can be empty except countries below)
-  ];
-
-  for (const field of requiredFields) {
-    // We only require the key to exist for address2/tax_number; others must be non-empty.
-    if (!(field in address)) {
-      throw new Error(`Address field missing: ${field}`);
-    }
-
-    const val = address[field];
-
-    if (field !== "address2" && field !== "tax_number") {
-      if (!val || String(val).trim() === "") {
-        throw new Error(`Address field missing or empty: ${field}`);
-      }
-    }
-  }
-
-  const cc = String(address.country_code).toUpperCase();
-
-  // tax_number must be non-empty for these countries
-  if (TAX_REQUIRED_COUNTRIES.includes(cc)) {
-    if (!address.tax_number || String(address.tax_number).trim() === "") {
-      throw new Error(`tax_number is required for orders shipped to ${cc}`);
-    }
-  }
-}
-
-/**
- * Validate Wooacry SKU structure
- */
-function validateSKUs(skus) {
+function validateSkus(skus) {
   if (!Array.isArray(skus) || skus.length === 0) {
-    throw new Error("Invalid or missing skus");
+    throw new Error("Missing or invalid skus");
   }
 
-  for (const sku of skus) {
-    if (!sku.customize_no || typeof sku.customize_no !== "string") {
-      throw new Error("SKU missing customize_no");
+  return skus.map((s) => {
+    const customize_no = String(s?.customize_no || "").trim();
+    const count = Number(s?.count);
+
+    if (!customize_no) throw new Error("SKU missing customize_no");
+    if (!Number.isFinite(count) || count <= 0) {
+      throw new Error(`Invalid count for customize_no ${customize_no}`);
     }
 
-    if (typeof sku.count !== "number" || sku.count <= 0) {
-      throw new Error(`SKU missing valid count for customize_no ${sku.customize_no}`);
-    }
-  }
+    return { customize_no, count: Math.trunc(count) };
+  });
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method Not Allowed" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
 
   try {
     const { third_party_user, skus, address } = req.body || {};
 
-    if (!third_party_user || typeof third_party_user !== "string") {
-      return res.status(400).json({ error: "Missing or invalid third_party_user" });
-    }
+    const tpu = String(third_party_user || "").trim();
+    if (!tpu) return res.status(400).json({ error: "Missing or invalid third_party_user" });
 
+    let skuList;
     try {
-      validateSKUs(skus);
-    } catch (err) {
-      return res.status(400).json({ error: err.message });
+      skuList = validateSkus(skus);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
     }
 
-    if (!address || typeof address !== "object") {
-      return res.status(400).json({ error: "Missing address" });
-    }
-
-    // Normalize required doc fields so the validator can enforce presence
-    const normalizedAddress = {
-      first_name: address.first_name ?? "",
-      last_name: address.last_name ?? "",
-      phone: address.phone ?? "",
-      country_code: (address.country_code ?? "").toString().toUpperCase(),
-      province: address.province ?? "",
-      city: address.city ?? "",
-      address1: address.address1 ?? "",
-      address2: address.address2 ?? "",     // required by docs, allow empty string
-      post_code: address.post_code ?? "",
-      tax_number: address.tax_number ?? ""  // required by docs, allow empty unless listed countries
-    };
-
+    let normalizedAddress;
     try {
-      validateAddress(normalizedAddress);
-    } catch (err) {
-      return res.status(400).json({ error: err.message });
+      normalizedAddress = normalizeWooacryAddress(address);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
     }
 
-    // Pre-order body per docs :contentReference[oaicite:13]{index=13}
-    const body = {
-      third_party_user,
-      skus,
-      address: normalizedAddress
-    };
+    const bodyObj = { third_party_user: tpu, skus: skuList, address: normalizedAddress };
+    const raw = JSON.stringify(bodyObj);
 
-    const raw = JSON.stringify(body);
+    const wooResp = await fetch(`${WOOACRY_API_BASE}/api/reseller/open/order/create/pre`, {
+      method: "POST",
+      headers: buildHeaders(raw),
+      body: raw
+    });
 
-    const response = await fetch(
-      "https://api-new.wooacry.com/api/reseller/open/order/create/pre",
-      {
-        method: "POST",
-        headers: buildHeaders(raw), // must implement Sign/Reseller-Flag/Timestamp/Version/Content-Type per docs
-        body: raw
-      }
-    );
-
-    const text = await response.text();
-    let result;
-    try {
-      result = JSON.parse(text);
-    } catch {
+    const parsed = await readWooacryJson(wooResp);
+    if (!parsed.ok) {
       return res.status(502).json({
         error: "Wooacry returned non-JSON for order/create/pre",
-        wooacry_http_status: response.status,
-        body_preview: text.slice(0, 800)
+        wooacry_http_status: wooResp.status,
+        body_preview: parsed.raw.slice(0, 800)
       });
     }
 
-    // Preserve Wooacry status shape; you can decide later if you want to map HTTP codes
-    return res.status(200).json(result);
+    return res.status(200).json(parsed.json);
   } catch (err) {
-    console.error("Preorder Error:", err);
+    console.error("[wooacry-preorder ERROR]", err);
     return res.status(500).json({ error: err.message });
   }
 }
