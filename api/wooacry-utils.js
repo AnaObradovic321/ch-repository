@@ -9,10 +9,18 @@ export const WOOACRY_RESELLER_FLAG =
 export const WOOACRY_SECRET = process.env.WOOACRY_SECRET; // REQUIRED
 export const WOOACRY_VERSION = process.env.WOOACRY_VERSION || "1";
 
+export const WOOACRY_API_BASE =
+  process.env.WOOACRY_API_BASE ||
+  process.env.WOOACRY_BASE ||
+  "https://api-new.wooacry.com";
+
+/**
+ * Countries where tax_number must be non-empty (Wooacry docs list)
+ */
+export const TAX_REQUIRED_COUNTRIES = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
+
 function assertSecrets() {
-  if (!WOOACRY_SECRET) {
-    throw new Error("Missing WOOACRY_SECRET env var");
-  }
+  if (!WOOACRY_SECRET) throw new Error("Missing WOOACRY_SECRET env var");
 }
 
 /* ----------------------------------------
@@ -40,15 +48,13 @@ export function buildSignature(rawBodyString, timestamp) {
 
 /* ----------------------------------------
    Header builder
-   Pass timestamp if you want full control
+   NOTE: Body must match exactly what is signed
 ---------------------------------------- */
 export function buildHeaders(rawBodyString, providedTimestamp) {
   assertSecrets();
 
   const timestamp =
-    typeof providedTimestamp === "number"
-      ? providedTimestamp
-      : generateTimestamp();
+    typeof providedTimestamp === "number" ? providedTimestamp : generateTimestamp();
 
   const sign = buildSignature(rawBodyString, timestamp);
 
@@ -62,52 +68,91 @@ export function buildHeaders(rawBodyString, providedTimestamp) {
 }
 
 /* ----------------------------------------
-   Wooacry allowed country codes
+   Tax number validation (minimal, doc-aligned)
+   Docs specify digit lengths for some countries and KR format.
 ---------------------------------------- */
-export const WOOACRY_COUNTRY_CODES = new Set([
-  "AF","AX","AL","DZ","AS","AD","AO","AI","AQ","AG","AR","AM","AW","AU","AT",
-  "AZ","BS","BH","BD","BB","BY","BE","PW","BZ","BJ","BM","BT","BO","BQ","BA",
-  "BW","BV","BR","IO","BN","BG","BF","BI","KH","CM","CA","CV","KY","CF","TD",
-  "CL","CN","CX","CC","CO","KM","CG","CD","CK","CR","HR","CU","CW","CY","CZ",
-  "DK","DJ","DM","DO","EC","EG","SV","GQ","ER","EE","ET","FK","FO","FJ","FI",
-  "FR","GF","PF","TF","GA","GM","GE","DE","GH","GI","GR","GL","GD","GP","GU",
-  "GT","GG","GN","GW","GY","HT","HM","HN","HK","HU","IS","IN","ID","IR","IQ",
-  "IE","IM","IL","IT","CI","JM","JP","JE","JO","KZ","KE","KI","KW","KG","LA",
-  "LV","LB","LS","LR","LY","LI","LT","LU","MO","MK","MG","MW","MY","MV","ML",
-  "MT","MH","MQ","MR","MU","YT","MX","FM","MD","MC","MN","ME","MS","MA","MZ",
-  "MM","NA","NR","NP","NL","NC","NZ","NI","NE","NG","NU","NF","MP","KP","NO",
-  "OM","PK","PS","PA","PG","PY","PE","PH","PN","PL","PT","PR","QA","RE","RO",
-  "RU","RW","BL","SH","KN","LC","MF","SX","PM","VC","SM","ST","SA","SN","RS",
-  "SC","SL","SG","SK","SI","SB","SO","ZA","GS","KR","SS","ES","LK","SD","SR",
-  "SJ","SZ","SE","CH","SY","TW","TJ","TZ","TH","TL","TG","TK","TO","TT","TN",
-  "TR","TM","TC","TV","UG","UA","AE","GB","US","UM","UY","UZ","VU","VA","VE",
-  "VN","VG","VI","WF","EH","WS","YE","ZM","ZW"
-]);
+export function validateWooacryTaxNumber(countryCode, taxNumber) {
+  const cc = String(countryCode || "").toUpperCase().trim();
+  const tn = String(taxNumber || "").trim();
+
+  if (!TAX_REQUIRED_COUNTRIES.includes(cc)) return;
+
+  if (!tn) throw new Error(`tax_number is required for orders shipped to ${cc}`);
+
+  // Doc-specific stricter checks where format is explicitly specified
+  if (cc === "TR" || cc === "AR") {
+    if (!/^\d{11}$/.test(tn)) throw new Error(`tax_number for ${cc} must be 11 digits`);
+  }
+
+  if (cc === "MX") {
+    if (!/^(\d{12}|\d{13}|\d{18})$/.test(tn)) {
+      throw new Error("tax_number for MX must be 12, 13, or 18 digits");
+    }
+  }
+
+  if (cc === "KR") {
+    // Docs: “P” + 12 digits
+    if (!/^P\d{12}$/.test(tn)) {
+      throw new Error('tax_number for KR must match "P" + 12 digits (example: P123456789012)');
+    }
+    // Docs also say authenticity must be verified. That is typically done by Wooacry downstream.
+  }
+}
 
 /* ----------------------------------------
-   Address Normalizer (STRICT)
-   Do NOT silently change country, that breaks shipping quotes.
+   Address normalizer (doc-aligned)
+   Required non-empty fields:
+   first_name, last_name, phone, country_code, province, city, address1, post_code
+   Required keys (may be empty strings): address2, tax_number
 ---------------------------------------- */
-export function validateWooacryAddress(address) {
+function requireNonEmptyString(value, fieldName) {
+  const s = String(value ?? "").trim();
+  if (!s) throw new Error(`Missing or empty field: ${fieldName}`);
+  return s;
+}
+
+export function normalizeWooacryAddress(address) {
   if (!address || typeof address !== "object") {
-    throw new Error("Invalid address object: must be an object");
+    throw new Error("Invalid address: must be an object");
   }
 
-  const code = (address.country_code || "").toUpperCase().trim();
-  if (!WOOACRY_COUNTRY_CODES.has(code)) {
-    throw new Error(`Invalid country_code: ${code || "(empty)"}`);
+  const country_code = requireNonEmptyString(address.country_code, "address.country_code")
+    .toUpperCase()
+    .trim();
+
+  // Keep validation permissive: Wooacry will validate actual supported destinations.
+  if (!/^[A-Z]{2}$/.test(country_code)) {
+    throw new Error(`Invalid country_code (expected ISO-2): ${country_code}`);
   }
 
-  return {
-    first_name: address.first_name || "",
-    last_name: address.last_name || "",
-    phone: address.phone || "",
-    country_code: code,
-    province: address.province || "",
-    city: address.city || "",
-    address1: address.address1 || "",
-    address2: address.address2 || "",
-    post_code: address.post_code || "",
-    tax_number: address.tax_number || ""
+  const normalized = {
+    first_name: requireNonEmptyString(address.first_name, "address.first_name"),
+    last_name: requireNonEmptyString(address.last_name, "address.last_name"),
+    phone: requireNonEmptyString(address.phone, "address.phone"),
+    country_code,
+    province: requireNonEmptyString(address.province, "address.province"),
+    city: requireNonEmptyString(address.city, "address.city"),
+    address1: requireNonEmptyString(address.address1, "address.address1"),
+    // Docs require address2 key; allow empty string if user has no unit/apt
+    address2: String(address.address2 ?? ""),
+    post_code: requireNonEmptyString(address.post_code, "address.post_code"),
+    // Docs require tax_number key; may be empty except certain countries
+    tax_number: String(address.tax_number ?? "")
   };
+
+  validateWooacryTaxNumber(normalized.country_code, normalized.tax_number);
+
+  return normalized;
+}
+
+/* ----------------------------------------
+   Safe Wooacry JSON read helper
+---------------------------------------- */
+export async function readWooacryJson(resp) {
+  const text = await resp.text();
+  try {
+    return { ok: true, json: JSON.parse(text), raw: text };
+  } catch {
+    return { ok: false, json: null, raw: text };
+  }
 }
