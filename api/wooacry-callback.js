@@ -62,15 +62,15 @@ export default async function handler(req, res) {
     const m1 = mockups[0] || "";
     const m2 = mockups[1] || "";
 
-    // FIX: correct key name
-    const third_party_user = info?.data?.third_party_user || "";
+    // Per Wooacry docs: response field is "third_part_user"
+    const third_part_user = info?.data?.third_part_user || "";
 
     if (String(debug) === "1") {
       return res.status(200).json({
         ok: true,
         customize_no: String(customize_no),
         variant_id: String(variant_id),
-        third_party_user: third_party_user || null,
+        third_part_user: third_part_user || null,
         mockups_count: mockups.length,
         mockups_preview: mockups.slice(0, 2)
       });
@@ -83,7 +83,9 @@ export default async function handler(req, res) {
 
     if (m1) params.set("properties[mockup_1]", m1);
     if (m2) params.set("properties[mockup_2]", m2);
-    if (third_party_user) params.set("properties[third_party_user]", String(third_party_user));
+
+    // Store it using your preferred property key name
+    if (third_part_user) params.set("properties[third_party_user]", String(third_part_user));
 
     const addUrl = `https://${SHOP}.myshopify.com/cart/add?${params.toString()}`;
     return res.redirect(302, addUrl);
