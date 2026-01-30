@@ -1,10 +1,9 @@
-import {
-  WOOACRY_API_BASE,
-  buildHeaders,
-  readWooacryJson
-} from "./wooacry-utils.js";
+import { WOOACRY_API_BASE, buildHeaders, readWooacryJson } from "./wooacry-utils.js";
 
-const SHOP = process.env.SHOPIFY_STORE_HANDLE || process.env.SHOPIFY_SHOP_HANDLE || "characterhub-merch-store";
+const SHOP =
+  process.env.SHOPIFY_STORE_HANDLE ||
+  process.env.SHOPIFY_SHOP_HANDLE ||
+  "characterhub-merch-store";
 
 function getCustomizeNo(req) {
   if (req.query?.customize_no) return String(req.query.customize_no);
@@ -63,7 +62,8 @@ export default async function handler(req, res) {
     const m1 = mockups[0] || "";
     const m2 = mockups[1] || "";
 
-    const third_party_user = info?.data?.third_part_user || "";
+    // FIX: correct key name
+    const third_party_user = info?.data?.third_party_user || "";
 
     if (String(debug) === "1") {
       return res.status(200).json({
