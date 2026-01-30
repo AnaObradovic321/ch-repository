@@ -186,8 +186,11 @@ export default async function handler(req, res) {
     const third_party_order_sn = asString(order.id).trim();
     const createdAt = order.created_at || order.processed_at || new Date().toISOString();
     const third_party_order_created_at = Math.floor(new Date(createdAt).getTime() / 1000);
-    const third_party_user = asString(order.email).trim() || "guest";
+const email = asString(order.email).trim().toLowerCase();
+const third_party_user = email || `guest_${asString(order.id).trim()}`;
 
+// Persist so other flows can reuse it
+await upsertOrderMetafield(order.id, "wooacry", "third_party_user", third_party_user, "single_line_text_field");
     const wooItems = [];
     for (const item of order.line_items || []) {
       const customize_no = getLineItemProperty(item, "customize_no");
