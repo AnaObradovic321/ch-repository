@@ -19,15 +19,57 @@ function getBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
-function getThirdPartyUser(req) {
-  const explicit = req.query.third_party_user || req.query.user_id || req.query.customer_id || req.query.user;
-  if (explicit) return String(explicit);
+function cleanUserId(x) {
+  return String(x || "").trim();
+}
 
+function normalizeEmail(x) {
+  const s = String(x || "").trim();
+  return s ? s.toLowerCase() : "";
+}
+
+/**
+ * CRITICAL: third_party_user must be consistent across:
+ * - /order/create/pre
+ * - /order/create
+ * - /web/editor/redirect
+ *
+ * Priority:
+ * 1) Explicit user identifiers from query (email or your internal user id)
+ * 2) Shopify customer id (stable)
+ * 3) Shopify order id (stable if you pass it in)
+ * 4) Last resort: ip+ua hash (least stable)
+ */
+function getThirdPartyUser(req) {
+  // 1) Explicit (recommended): pass customer email or your user id
+  const explicit =
+    req.query.third_party_user ||
+    req.query.customer_email ||
+    req.query.email ||
+    req.query.user_id ||
+    req.query.customer_id ||
+    req.query.user;
+
+  if (explicit) {
+    const maybeEmail = normalizeEmail(explicit);
+    return maybeEmail || cleanUserId(explicit);
+  }
+
+  // 2) Stable: Shopify customer id (best guest fallback)
+  const shopifyCustomerId = req.query.shopify_customer_id || req.query.customer_id;
+  if (shopifyCustomerId) return `guest_${cleanUserId(shopifyCustomerId)}`;
+
+  // 3) Stable: Shopify order id (works if you include it in the customize link)
+  const shopifyOrderId = req.query.order_id || req.query.shopify_order_id;
+  if (shopifyOrderId) return `guest_${cleanUserId(shopifyOrderId)}`;
+
+  // 4) Worst fallback: IP+UA hash (can change, but better than nothing)
   const ip =
     (req.headers["x-forwarded-for"] || "").toString().split(",")[0].trim() ||
-    (req.socket?.remoteAddress || "0.0.0.0");
-  const ua = (req.headers["user-agent"] || "unknown").toString();
+    req.socket?.remoteAddress ||
+    "0.0.0.0";
 
+  const ua = (req.headers["user-agent"] || "unknown").toString();
   const raw = `${ip}|${ua}`;
   const hash = crypto.createHash("sha256").update(raw).digest("hex").slice(0, 16);
   return `guest_${hash}`;
@@ -80,7 +122,7 @@ export default async function handler(req, res) {
       });
     }
 
-    const timestamp = Math.floor(Date.now() / 1000); // redirect endpoint allows 60s drift per docs
+    const timestamp = Math.floor(Date.now() / 1000);
     const third_party_user = getThirdPartyUser(req);
 
     const baseUrl = getBaseUrl(req);
