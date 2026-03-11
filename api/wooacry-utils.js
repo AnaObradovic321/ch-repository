@@ -3,10 +3,8 @@ import crypto from "crypto";
 /* ----------------------------------------
    Wooacry Credentials (ENV ONLY)
 ---------------------------------------- */
-export const WOOACRY_RESELLER_FLAG =
-  process.env.WOOACRY_RESELLER_FLAG || "characterhub";
-
-export const WOOACRY_SECRET = process.env.WOOACRY_SECRET; // REQUIRED
+export const WOOACRY_RESELLER_FLAG = process.env.WOOACRY_RESELLER_FLAG || "";
+export const WOOACRY_SECRET = process.env.WOOACRY_SECRET || "";
 export const WOOACRY_VERSION = process.env.WOOACRY_VERSION || "1";
 
 export const WOOACRY_API_BASE =
@@ -14,13 +12,21 @@ export const WOOACRY_API_BASE =
   process.env.WOOACRY_BASE ||
   "https://api-new.wooacry.com";
 
+export const WOOACRY_EDITOR_BASE =
+  process.env.WOOACRY_EDITOR_BASE || WOOACRY_API_BASE;
+
 /**
- * Countries where tax_number must be non-empty (Wooacry docs list)
+ * Countries where tax_number must be non-empty
+ * per Wooacry docs
  */
 export const TAX_REQUIRED_COUNTRIES = ["TR", "MX", "CL", "BR", "ZA", "KR", "AR"];
 
-function assertSecrets() {
+function assertWooacryConfig() {
+  if (!WOOACRY_RESELLER_FLAG) throw new Error("Missing WOOACRY_RESELLER_FLAG env var");
   if (!WOOACRY_SECRET) throw new Error("Missing WOOACRY_SECRET env var");
+  if (WOOACRY_VERSION !== "1") {
+    throw new Error(`Invalid WOOACRY_VERSION "${WOOACRY_VERSION}". Wooacry docs require "1".`);
+  }
 }
 
 /* ----------------------------------------
@@ -31,27 +37,28 @@ export function generateTimestamp() {
 }
 
 /* ----------------------------------------
-   MD5 Signature (5-line exact per docs)
+   API MD5 Signature (5-line exact per docs)
 ---------------------------------------- */
 export function buildSignature(rawBodyString, timestamp) {
-  assertSecrets();
+  assertWooacryConfig();
+
+  const raw = String(rawBodyString ?? "");
 
   const signatureString =
     `${WOOACRY_RESELLER_FLAG}\n` +
     `${timestamp}\n` +
     `${WOOACRY_VERSION}\n` +
-    `${rawBodyString}\n` +
+    `${raw}\n` +
     `${WOOACRY_SECRET}\n`;
 
   return crypto.createHash("md5").update(signatureString).digest("hex");
 }
 
 /* ----------------------------------------
-   Header builder
-   NOTE: Body must match exactly what is signed
+   Header builder for signed API requests
 ---------------------------------------- */
 export function buildHeaders(rawBodyString, providedTimestamp) {
-  assertSecrets();
+  assertWooacryConfig();
 
   const timestamp =
     typeof providedTimestamp === "number" ? providedTimestamp : generateTimestamp();
@@ -68,8 +75,71 @@ export function buildHeaders(rawBodyString, providedTimestamp) {
 }
 
 /* ----------------------------------------
-   Tax number validation (minimal, doc-aligned)
-   Docs specify digit lengths for some countries and KR format.
+   Build signed request parts from an object
+   Prevents body/signature mismatch
+---------------------------------------- */
+export function buildSignedJsonRequest(bodyObj, providedTimestamp) {
+  const raw = JSON.stringify(bodyObj);
+  const headers = buildHeaders(raw, providedTimestamp);
+  return { raw, headers };
+}
+
+/* ----------------------------------------
+   Editor redirect signature
+   reseller_flag=<flag>&timestamp=<ts>&third_party_user=<user>&secret=<secret>
+---------------------------------------- */
+export function buildEditorRedirectSignature(thirdPartyUser, timestamp) {
+  assertWooacryConfig();
+
+  const ts = typeof timestamp === "number" ? timestamp : generateTimestamp();
+  const user = String(thirdPartyUser || "").trim();
+
+  if (!user) throw new Error("Missing thirdPartyUser for Wooacry editor redirect");
+
+  const signatureString =
+    `reseller_flag=${WOOACRY_RESELLER_FLAG}` +
+    `&timestamp=${ts}` +
+    `&third_party_user=${user}` +
+    `&secret=${WOOACRY_SECRET}`;
+
+  return crypto.createHash("md5").update(signatureString).digest("hex");
+}
+
+/* ----------------------------------------
+   Build full editor redirect URL
+---------------------------------------- */
+export function buildEditorRedirectUrl({
+  redirectUrl,
+  thirdPartyUser,
+  thirdPartySpu,
+  timestamp
+}) {
+  assertWooacryConfig();
+
+  const ts = typeof timestamp === "number" ? timestamp : generateTimestamp();
+  const redirect = String(redirectUrl || "").trim();
+  const user = String(thirdPartyUser || "").trim();
+  const spu = String(thirdPartySpu || "").trim();
+
+  if (!redirect) throw new Error("Missing redirectUrl");
+  if (!user) throw new Error("Missing thirdPartyUser");
+  if (!spu) throw new Error("Missing thirdPartySpu");
+
+  const sign = buildEditorRedirectSignature(user, ts);
+
+  const url = new URL("/api/reseller/web/editor/redirect", WOOACRY_EDITOR_BASE);
+  url.searchParams.set("reseller_flag", WOOACRY_RESELLER_FLAG);
+  url.searchParams.set("timestamp", String(ts));
+  url.searchParams.set("redirect_url", redirect);
+  url.searchParams.set("third_party_spu", spu);
+  url.searchParams.set("third_party_user", user);
+  url.searchParams.set("sign", sign);
+
+  return url.toString();
+}
+
+/* ----------------------------------------
+   Tax number validation
 ---------------------------------------- */
 export function validateWooacryTaxNumber(countryCode, taxNumber) {
   const cc = String(countryCode || "").toUpperCase().trim();
@@ -79,7 +149,6 @@ export function validateWooacryTaxNumber(countryCode, taxNumber) {
 
   if (!tn) throw new Error(`tax_number is required for orders shipped to ${cc}`);
 
-  // Doc-specific stricter checks where format is explicitly specified
   if (cc === "TR" || cc === "AR") {
     if (!/^\d{11}$/.test(tn)) throw new Error(`tax_number for ${cc} must be 11 digits`);
   }
@@ -91,19 +160,14 @@ export function validateWooacryTaxNumber(countryCode, taxNumber) {
   }
 
   if (cc === "KR") {
-    // Docs: “P” + 12 digits
     if (!/^P\d{12}$/.test(tn)) {
-      throw new Error('tax_number for KR must match "P" + 12 digits (example: P123456789012)');
+      throw new Error('tax_number for KR must match "P" + 12 digits');
     }
-    // Docs also say authenticity must be verified. That is typically done by Wooacry downstream.
   }
 }
 
 /* ----------------------------------------
-   Address normalizer (doc-aligned)
-   Required non-empty fields:
-   first_name, last_name, phone, country_code, province, city, address1, post_code
-   Required keys (may be empty strings): address2, tax_number
+   Address normalizer
 ---------------------------------------- */
 function requireNonEmptyString(value, fieldName) {
   const s = String(value ?? "").trim();
@@ -120,7 +184,6 @@ export function normalizeWooacryAddress(address) {
     .toUpperCase()
     .trim();
 
-  // Keep validation permissive: Wooacry will validate actual supported destinations.
   if (!/^[A-Z]{2}$/.test(country_code)) {
     throw new Error(`Invalid country_code (expected ISO-2): ${country_code}`);
   }
@@ -133,10 +196,8 @@ export function normalizeWooacryAddress(address) {
     province: requireNonEmptyString(address.province, "address.province"),
     city: requireNonEmptyString(address.city, "address.city"),
     address1: requireNonEmptyString(address.address1, "address.address1"),
-    // Docs require address2 key; allow empty string if user has no unit/apt
     address2: String(address.address2 ?? ""),
     post_code: requireNonEmptyString(address.post_code, "address.post_code"),
-    // Docs require tax_number key; may be empty except certain countries
     tax_number: String(address.tax_number ?? "")
   };
 
