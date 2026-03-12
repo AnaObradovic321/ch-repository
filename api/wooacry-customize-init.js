@@ -1,20 +1,32 @@
-import crypto from "crypto";
-
-const RESELLER_FLAG = process.env.WOOACRY_RESELLER_FLAG || "characterhub";
-const SECRET = process.env.WOOACRY_SECRET; // REQUIRED
-
-const API_URL_PROD =
-  process.env.WOOACRY_EDITOR_REDIRECT_URL ||
-  "https://api-new.wooacry.com/api/reseller/web/editor/redirect";
-
-const API_URL_PRE =
-  process.env.WOOACRY_EDITOR_REDIRECT_URL_PRE ||
-  "https://preapi.wooacry.com/api/reseller/web/editor/redirect";
+import {
+  WOOACRY_RESELLER_FLAG,
+  WOOACRY_EDITOR_BASE,
+  generateTimestamp,
+  buildEditorRedirectUrl
+} from "./wooacry-utils.js";
 
 const CALLBACK_STYLE = (process.env.WOOACRY_CALLBACK_STYLE || "query").toLowerCase();
 
+const WOOACRY_PRODUCTS = {
+  "001": "Custom Die-Cut Stickers",
+  "002": "Custom Clear Acrylic Keychains",
+  "003": "Custom Rainbow Acrylic Keychains",
+  "004": "Custom Clear Acrylic Standees",
+  "005": "Custom Rainbow Acrylic Standees",
+  "006": "Custom Plush Badges",
+  "007": "Custom Coated Paper Sticker Sheets",
+  "008": "Custom Body Pillowcases",
+  "009": "Custom Shaped Fridge Magnets",
+  "010": "Custom Poster Printing"
+};
+
 const SPU_MAP = {
-  "7551372951665": "453"
+  // Shopify product_id : Wooacry product code
+  "7503395029105": "001",
+  "7536764846193": "002",
+  "7536769433713": "003",
+  "7536772317297": "004",
+  "7551372951665": "010"
 };
 
 function getBaseUrl(req) {
@@ -33,10 +45,13 @@ function normalizeEmail(x) {
 }
 
 /**
- * Goal: third_party_user must be stable.
- * Best: email or your internal user id.
- * Fallback: shopify_customer_id or customer_id.
- * Last resort: deterministic guest hash.
+ * third_party_user must be stable.
+ * Best options:
+ * - your internal user id
+ * - customer email
+ * - Shopify customer id
+ *
+ * Do not fall back to IP/user-agent hashes for production order flows.
  */
 function getThirdPartyUser(req) {
   const explicit =
@@ -56,59 +71,47 @@ function getThirdPartyUser(req) {
     req.query.customer_id ||
     req.query.customer;
 
-  if (shopifyCustomerId) return `guest_${cleanUserId(shopifyCustomerId)}`;
-
-  // Deterministic fallback that will still be the same for the same user in the same browser.
-  // Uses user-agent + (optional) ip. Still not perfect, but better than pure randomness.
-  const ip =
-    (req.headers["x-forwarded-for"] || "").toString().split(",")[0].trim() ||
-    req.socket?.remoteAddress ||
-    "";
-
-  const ua = (req.headers["user-agent"] || "unknown").toString();
-  const raw = `${ip}|${ua}`;
-  const hash = crypto.createHash("sha256").update(raw).digest("hex").slice(0, 16);
-  return `guest_${hash}`;
-}
-
-// MD5("reseller_flag=...&timestamp=...&third_party_user=...&secret=...")
-function buildRedirectSign({ timestamp, third_party_user }) {
-  if (!SECRET) throw new Error("Missing WOOACRY_SECRET env var");
-
-  const sigString =
-    `reseller_flag=${RESELLER_FLAG}` +
-    `&timestamp=${timestamp}` +
-    `&third_party_user=${third_party_user}` +
-    `&secret=${SECRET}`;
-
-  return crypto.createHash("md5").update(sigString).digest("hex");
-}
-
-function buildRedirectUrl(baseUrl, product_id, variant_id) {
-  if (CALLBACK_STYLE === "path") {
-    return `${baseUrl}/api/wooacry-callback/${encodeURIComponent(
-      String(product_id)
-    )}/${encodeURIComponent(String(variant_id))}`;
+  if (shopifyCustomerId) {
+    return `customer_${cleanUserId(shopifyCustomerId)}`;
   }
 
-  return (
+  throw new Error("Missing stable user identifier for third_party_user");
+}
+
+function buildCallbackUrl(baseUrl, product_id, variant_id) {
+  if (CALLBACK_STYLE === "path") {
+    let url = `${baseUrl}/api/wooacry-callback/${encodeURIComponent(String(product_id))}`;
+    if (variant_id) {
+      url += `/${encodeURIComponent(String(variant_id))}`;
+    }
+    return url;
+  }
+
+  let url =
     `${baseUrl}/api/wooacry-callback` +
-    `?product_id=${encodeURIComponent(String(product_id))}` +
-    `&variant_id=${encodeURIComponent(String(variant_id))}`
-  );
+    `?product_id=${encodeURIComponent(String(product_id))}`;
+
+  if (variant_id) {
+    url += `&variant_id=${encodeURIComponent(String(variant_id))}`;
+  }
+
+  return url;
 }
 
 export default async function handler(req, res) {
   try {
-    if (!SECRET) {
-      return res
-        .status(500)
-        .json({ error: "Missing WOOACRY_SECRET env var. Refusing to run without it." });
+    if (!WOOACRY_RESELLER_FLAG) {
+      return res.status(500).json({
+        error: "Missing WOOACRY_RESELLER_FLAG env var"
+      });
     }
 
     const { product_id, variant_id } = req.query;
-    if (!product_id || !variant_id) {
-      return res.status(400).json({ error: "Missing product_id or variant_id" });
+
+    if (!product_id) {
+      return res.status(400).json({
+        error: "Missing product_id"
+      });
     }
 
     const overrideSpu = req.query.third_party_spu || req.query.spu || null;
@@ -117,40 +120,38 @@ export default async function handler(req, res) {
 
     if (!third_party_spu) {
       return res.status(500).json({
-        error: `No SPU configured for product ${product_id}`,
-        hint: "Add it to SPU_MAP or pass ?third_party_spu=453 to test."
+        error: `No Wooacry product code configured for Shopify product ${product_id}`,
+        hint: "Add the Shopify product ID to SPU_MAP once that product is set up in Shopify."
       });
     }
 
-    const timestamp = Math.floor(Date.now() / 1000);
+    const timestamp = generateTimestamp();
     const third_party_user = getThirdPartyUser(req);
 
     const baseUrl = getBaseUrl(req);
-    const redirect_url = buildRedirectUrl(baseUrl, product_id, variant_id);
-
-    const sign = buildRedirectSign({ timestamp, third_party_user });
+    const redirectUrl = buildCallbackUrl(baseUrl, product_id, variant_id);
 
     const usePre = String(req.query.use_pre || "") === "1";
-    const apiUrl = usePre ? API_URL_PRE : API_URL_PROD;
+    const editorBase = usePre
+      ? "https://preapi.wooacry.com"
+      : WOOACRY_EDITOR_BASE;
 
-    const finalUrl =
-      `${apiUrl}` +
-      `?reseller_flag=${encodeURIComponent(RESELLER_FLAG)}` +
-      `&timestamp=${encodeURIComponent(String(timestamp))}` +
-      `&redirect_url=${encodeURIComponent(redirect_url)}` +
-      `&third_party_user=${encodeURIComponent(third_party_user)}` +
-      `&third_party_spu=${encodeURIComponent(third_party_spu)}` +
-      `&sign=${encodeURIComponent(sign)}`;
+    const finalUrl = buildEditorRedirectUrl({
+      redirectUrl,
+      thirdPartyUser: third_party_user,
+      thirdPartySpu: third_party_spu,
+      timestamp,
+      baseUrl: editorBase
+    });
 
-    // Debug mode: lets you see exactly what is being sent to Wooacry
     if (String(req.query.debug || "") === "1") {
       return res.status(200).json({
-        reseller_flag: RESELLER_FLAG,
+        reseller_flag: WOOACRY_RESELLER_FLAG,
         timestamp,
-        redirect_url,
+        redirect_url: redirectUrl,
         third_party_user,
         third_party_spu,
-        sign,
+        wooacry_product_name: WOOACRY_PRODUCTS[third_party_spu] || null,
         finalUrl,
         using: usePre ? "preapi" : "api-new"
       });
@@ -159,6 +160,8 @@ export default async function handler(req, res) {
     return res.redirect(302, finalUrl);
   } catch (err) {
     console.error("[wooacry-customize-init ERROR]", err);
-    return res.status(500).json({ error: err?.message || "Unknown error" });
+    return res.status(500).json({
+      error: err?.message || "Unknown error"
+    });
   }
 }
