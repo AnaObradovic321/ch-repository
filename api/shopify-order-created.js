@@ -1,17 +1,20 @@
+import crypto from "crypto";
 import {
   WOOACRY_API_BASE,
-  buildHeaders,
+  buildSignedJsonRequest,
   normalizeWooacryAddress,
   readWooacryJson
 } from "./wooacry-utils.js";
 
-const SHOPIFY_STORE = process.env.SHOPIFY_STORE_HANDLE || "characterhub-merch-store";
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE_HANDLE || process.env.SHOPIFY_SHOP_HANDLE || "";
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-01";
-
 const SHOPIFY_ADMIN_API_TOKEN =
-  process.env.SHOPIFY_ADMIN_API_TOKEN || process.env.SHOPIFY_TOKEN;
+  process.env.SHOPIFY_ADMIN_API_TOKEN || process.env.SHOPIFY_TOKEN || "";
+const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET || "";
 
-const SHOPIFY_ADMIN_API = `https://${SHOPIFY_STORE}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`;
+const SHOPIFY_ADMIN_API = SHOPIFY_STORE
+  ? `https://${SHOPIFY_STORE}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`
+  : "";
 
 const WOOACRY_DRY_RUN = String(process.env.WOOACRY_DRY_RUN || "").trim() === "1";
 
@@ -20,9 +23,29 @@ function asString(x) {
   return String(x);
 }
 
-// Shopify line item properties can be:
-// Array: [{name:"customize_no", value:"..."}, ...]
-// Object: { customize_no: "..." }
+function safeCompare(a, b) {
+  const abuf = Buffer.from(a || "", "utf8");
+  const bbuf = Buffer.from(b || "", "utf8");
+  if (abuf.length !== bbuf.length) return false;
+  return crypto.timingSafeEqual(abuf, bbuf);
+}
+
+function verifyShopifyWebhook(req) {
+  if (!SHOPIFY_WEBHOOK_SECRET) {
+    throw new Error("Missing SHOPIFY_WEBHOOK_SECRET env var");
+  }
+
+  const hmacHeader = req.headers["x-shopify-hmac-sha256"];
+  if (!hmacHeader || !req.rawBody) return false;
+
+  const digest = crypto
+    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
+    .update(req.rawBody, "utf8")
+    .digest("base64");
+
+  return safeCompare(digest, String(hmacHeader));
+}
+
 function getLineItemProperty(lineItem, key) {
   const p = lineItem?.properties;
   if (!p) return null;
@@ -55,20 +78,32 @@ function pickCheapestShippingMethod(preJSON) {
 
 async function wooacryPreorder({ third_party_user, skus, address }) {
   const bodyObj = { third_party_user, skus, address };
-  const raw = JSON.stringify(bodyObj);
+  const { raw, headers } = buildSignedJsonRequest(bodyObj);
 
   const resp = await fetch(`${WOOACRY_API_BASE}/api/reseller/open/order/create/pre`, {
     method: "POST",
-    headers: buildHeaders(raw),
+    headers,
     body: raw
   });
 
   const parsed = await readWooacryJson(resp);
-  if (!parsed.ok) throw new Error(`Wooacry preorder returned non-JSON (HTTP ${resp.status})`);
-  if (!parsed.json || parsed.json.code !== 0) {
-    throw new Error(`Wooacry preorder failed: ${JSON.stringify(parsed.json).slice(0, 500)}`);
+  if (!parsed.ok) {
+    throw new Error(`Wooacry preorder returned non-JSON (HTTP ${resp.status})`);
   }
-  return parsed.json;
+
+  const result = parsed.json;
+  if (!result || result.code !== 0) {
+    throw new Error(`Wooacry preorder failed: ${JSON.stringify(result).slice(0, 500)}`);
+  }
+
+  if (
+    !Array.isArray(result?.data?.shipping_methods) ||
+    !Array.isArray(result?.data?.skus)
+  ) {
+    throw new Error("Wooacry preorder response missing shipping_methods or skus");
+  }
+
+  return result;
 }
 
 async function wooacryCreateOrder({
@@ -88,25 +123,36 @@ async function wooacryCreateOrder({
     address
   };
 
-  const raw = JSON.stringify(bodyObj);
+  const { raw, headers } = buildSignedJsonRequest(bodyObj);
 
   const resp = await fetch(`${WOOACRY_API_BASE}/api/reseller/open/order/create`, {
     method: "POST",
-    headers: buildHeaders(raw),
+    headers,
     body: raw
   });
 
   const parsed = await readWooacryJson(resp);
-  if (!parsed.ok) throw new Error(`Wooacry order/create returned non-JSON (HTTP ${resp.status})`);
-  if (!parsed.json || parsed.json.code !== 0) {
-    throw new Error(`Wooacry order/create failed: ${JSON.stringify(parsed.json).slice(0, 500)}`);
+  if (!parsed.ok) {
+    throw new Error(`Wooacry order/create returned non-JSON (HTTP ${resp.status})`);
   }
 
-  return parsed.json;
+  const result = parsed.json;
+  if (!result || result.code !== 0) {
+    throw new Error(`Wooacry order/create failed: ${JSON.stringify(result).slice(0, 500)}`);
+  }
+
+  if (
+    !result?.data?.order_sn ||
+    !Array.isArray(result?.data?.skus)
+  ) {
+    throw new Error("Wooacry order/create response missing order_sn or skus");
+  }
+
+  return result;
 }
 
 async function listOrderMetafields(orderId) {
-  if (!SHOPIFY_ADMIN_API_TOKEN) return [];
+  if (!SHOPIFY_ADMIN_API_TOKEN || !SHOPIFY_ADMIN_API) return [];
 
   const resp = await fetch(`${SHOPIFY_ADMIN_API}/orders/${orderId}/metafields.json`, {
     headers: {
@@ -120,7 +166,7 @@ async function listOrderMetafields(orderId) {
 }
 
 async function upsertOrderMetafield(orderId, namespace, key, value, type) {
-  if (!SHOPIFY_ADMIN_API_TOKEN) return null;
+  if (!SHOPIFY_ADMIN_API_TOKEN || !SHOPIFY_ADMIN_API) return null;
 
   const all = await listOrderMetafields(orderId);
   const existing = all.find((m) => m.namespace === namespace && m.key === key);
@@ -169,8 +215,31 @@ async function upsertOrderMetafield(orderId, namespace, key, value, type) {
   return json?.metafield || null;
 }
 
+async function getExistingThirdPartyUser(orderId) {
+  const metafields = await listOrderMetafields(orderId);
+  const hit = metafields.find(
+    (m) => m.namespace === "wooacry" && m.key === "third_party_user"
+  );
+  return hit?.value ? String(hit.value).trim() : "";
+}
+
 export default async function handler(req, res) {
   try {
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method Not Allowed" });
+    }
+
+    if (!SHOPIFY_STORE || !SHOPIFY_ADMIN_API_TOKEN || !SHOPIFY_ADMIN_API) {
+      return res.status(500).json({
+        error: "Missing Shopify admin configuration env vars"
+      });
+    }
+
+    // Requires rawBody support in your webhook setup
+    if (!verifyShopifyWebhook(req)) {
+      return res.status(401).json({ error: "Invalid Shopify webhook signature" });
+    }
+
     const order = req.body;
 
     if (!order || !order.id) {
@@ -178,43 +247,95 @@ export default async function handler(req, res) {
     }
 
     const metafields = await listOrderMetafields(order.id);
-    const already = metafields.find((m) => m.namespace === "wooacry" && m.key === "order_sn");
+
+    const already = metafields.find(
+      (m) => m.namespace === "wooacry" && m.key === "order_sn"
+    );
     if (already?.value) {
-      return res.status(200).json({ ok: true, already_created: true, wooacry_order_sn: already.value });
+      return res.status(200).json({
+        ok: true,
+        already_created: true,
+        wooacry_order_sn: already.value
+      });
     }
+
+    const statusField = metafields.find(
+      (m) => m.namespace === "wooacry" && m.key === "status"
+    );
+    if (statusField?.value === "CREATING") {
+      return res.status(200).json({
+        ok: true,
+        already_processing: true
+      });
+    }
+
+    await upsertOrderMetafield(
+      order.id,
+      "wooacry",
+      "status",
+      "CREATING",
+      "single_line_text_field"
+    );
 
     const third_party_order_sn = asString(order.id).trim();
     const createdAt = order.created_at || order.processed_at || new Date().toISOString();
     const third_party_order_created_at = Math.floor(new Date(createdAt).getTime() / 1000);
-const email = asString(order.email).trim().toLowerCase();
-const third_party_user = email || `guest_${asString(order.id).trim()}`;
 
-// Persist so other flows can reuse it
-await upsertOrderMetafield(order.id, "wooacry", "third_party_user", third_party_user, "single_line_text_field");
+    const savedThirdPartyUser = await getExistingThirdPartyUser(order.id);
+    const email = asString(order.email).trim().toLowerCase();
+    const third_party_user = savedThirdPartyUser || email || `guest_${third_party_order_sn}`;
+
+    await upsertOrderMetafield(
+      order.id,
+      "wooacry",
+      "third_party_user",
+      third_party_user,
+      "single_line_text_field"
+    );
+
     const wooItems = [];
     for (const item of order.line_items || []) {
       const customize_no = getLineItemProperty(item, "customize_no");
       if (customize_no) {
+        const count = Math.trunc(Number(item.quantity || 1));
+        if (count <= 0) continue;
+
         wooItems.push({
           customize_no: asString(customize_no).trim(),
-          count: Math.trunc(Number(item.quantity || 1))
+          count
         });
       }
     }
 
     if (wooItems.length === 0) {
+      await upsertOrderMetafield(
+        order.id,
+        "wooacry",
+        "status",
+        "SKIPPED_NO_WOOACRY_ITEMS",
+        "single_line_text_field"
+      );
       return res.status(200).json({ ok: true, skipped: true });
     }
 
     const ship = order.shipping_address || order.billing_address;
-    if (!ship) return res.status(400).json({ error: "Missing shipping_address on order" });
+    if (!ship) {
+      await upsertOrderMetafield(
+        order.id,
+        "wooacry",
+        "status",
+        "FAILED: Missing shipping_address on order",
+        "single_line_text_field"
+      );
+      return res.status(400).json({ error: "Missing shipping_address on order" });
+    }
 
     let normalizedAddress;
     try {
       normalizedAddress = normalizeWooacryAddress({
         first_name: ship.first_name || "",
         last_name: ship.last_name || "",
-        phone: ship.phone || order.phone || (order.billing_address && order.billing_address.phone) || "",
+        phone: ship.phone || order.phone || order.billing_address?.phone || "",
         country_code: (ship.country_code || "").toUpperCase(),
         province: ship.province || "",
         city: ship.city || "",
@@ -224,13 +345,30 @@ await upsertOrderMetafield(order.id, "wooacry", "third_party_user", third_party_
         tax_number: ship.tax_number || ""
       });
     } catch (e) {
-      await upsertOrderMetafield(order.id, "wooacry", "status", `FAILED: ${e.message}`, "single_line_text_field");
+      await upsertOrderMetafield(
+        order.id,
+        "wooacry",
+        "status",
+        `FAILED: ${e.message}`,
+        "single_line_text_field"
+      );
       return res.status(400).json({ error: e.message });
     }
 
     if (WOOACRY_DRY_RUN) {
-      await upsertOrderMetafield(order.id, "wooacry", "status", "DRY RUN: Production Started", "single_line_text_field");
-      return res.status(200).json({ ok: true, dry_run: true, woo_items: wooItems, normalized_address: normalizedAddress });
+      await upsertOrderMetafield(
+        order.id,
+        "wooacry",
+        "status",
+        "DRY_RUN_READY",
+        "single_line_text_field"
+      );
+      return res.status(200).json({
+        ok: true,
+        dry_run: true,
+        woo_items: wooItems,
+        normalized_address: normalizedAddress
+      });
     }
 
     const preJSON = await wooacryPreorder({
@@ -253,13 +391,30 @@ await upsertOrderMetafield(order.id, "wooacry", "third_party_user", third_party_
     const wooacry_order_sn = createJSON?.data?.order_sn || null;
 
     if (wooacry_order_sn) {
-      await upsertOrderMetafield(order.id, "wooacry", "order_sn", wooacry_order_sn, "single_line_text_field");
+      await upsertOrderMetafield(
+        order.id,
+        "wooacry",
+        "order_sn",
+        wooacry_order_sn,
+        "single_line_text_field"
+      );
     }
-    await upsertOrderMetafield(order.id, "wooacry", "status", "Production Started", "single_line_text_field");
 
-    return res.status(200).json({ ok: true, wooacry_order_sn, wooacry_create_response: createJSON });
+    await upsertOrderMetafield(
+      order.id,
+      "wooacry",
+      "status",
+      "PRODUCTION_STARTED",
+      "single_line_text_field"
+    );
+
+    return res.status(200).json({
+      ok: true,
+      wooacry_order_sn,
+      wooacry_create_response: createJSON
+    });
   } catch (err) {
     console.error("[shopify-order-created ERROR]", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err?.message || "Unknown error" });
   }
 }
