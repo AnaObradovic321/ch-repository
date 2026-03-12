@@ -11,8 +11,6 @@ const SHOPIFY_ADMIN_API = SHOPIFY_STORE
 const SHOPIFY_CLIENT_ID = process.env.SHOPIFY_CLIENT_ID || "";
 const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET || "";
 
-const WOOACRY_WEBHOOK_SECRET = process.env.WOOACRY_WEBHOOK_SECRET || "";
-
 const WOO_SUCCESS = { data: [], code: 0, message: "success" };
 
 let cachedShopifyToken = "";
@@ -25,7 +23,6 @@ async function getShopifyAccessToken() {
 
   const now = Date.now();
 
-  // Refresh a little early to avoid edge expiry failures
   if (cachedShopifyToken && cachedShopifyTokenExpiresAt > now + 60 * 1000) {
     return cachedShopifyToken;
   }
@@ -108,15 +105,6 @@ function normalizeWooacryBody(req) {
   }
 }
 
-function getProvidedWebhookSecret(req) {
-  return (
-    req.headers["x-wooacry-secret"] ||
-    req.headers["x-webhook-secret"] ||
-    req.query.secret ||
-    ""
-  );
-}
-
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
@@ -126,14 +114,6 @@ export default async function handler(req, res) {
     if (!SHOPIFY_STORE || !SHOPIFY_ADMIN_API || !SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET) {
       console.error("[wooacry-shipping-webhook] Missing Shopify client credential env vars");
       return res.status(200).json(WOO_SUCCESS);
-    }
-
-    if (WOOACRY_WEBHOOK_SECRET) {
-      const provided = String(getProvidedWebhookSecret(req)).trim();
-      if (!provided || provided !== String(WOOACRY_WEBHOOK_SECRET).trim()) {
-        console.error("[wooacry-shipping-webhook] Unauthorized: bad secret");
-        return res.status(200).json(WOO_SUCCESS);
-      }
     }
 
     const body = normalizeWooacryBody(req);
