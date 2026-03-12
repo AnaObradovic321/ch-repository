@@ -8,16 +8,71 @@ const SHOPIFY_ADMIN_API = SHOPIFY_STORE
   ? `https://${SHOPIFY_STORE}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`
   : "";
 
-const SHOPIFY_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN || process.env.SHOPIFY_TOKEN || "";
+const SHOPIFY_CLIENT_ID = process.env.SHOPIFY_CLIENT_ID || "";
+const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET || "";
+
 const WOOACRY_WEBHOOK_SECRET = process.env.WOOACRY_WEBHOOK_SECRET || "";
 
 const WOO_SUCCESS = { data: [], code: 0, message: "success" };
 
+let cachedShopifyToken = "";
+let cachedShopifyTokenExpiresAt = 0;
+
+async function getShopifyAccessToken() {
+  if (!SHOPIFY_STORE || !SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET) {
+    throw new Error("Missing Shopify client credential env vars");
+  }
+
+  const now = Date.now();
+
+  // Refresh a little early to avoid edge expiry failures
+  if (cachedShopifyToken && cachedShopifyTokenExpiresAt > now + 60 * 1000) {
+    return cachedShopifyToken;
+  }
+
+  const body = new URLSearchParams();
+  body.set("grant_type", "client_credentials");
+  body.set("client_id", SHOPIFY_CLIENT_ID);
+  body.set("client_secret", SHOPIFY_CLIENT_SECRET);
+
+  const resp = await fetch(`https://${SHOPIFY_STORE}.myshopify.com/admin/oauth/access_token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "application/json"
+    },
+    body: body.toString()
+  });
+
+  const text = await resp.text();
+  let json = null;
+
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  if (!resp.ok || !json?.access_token) {
+    throw new Error(
+      `Failed to fetch Shopify access token (${resp.status}): ${text || resp.statusText}`
+    );
+  }
+
+  const expiresIn = Number(json.expires_in || 0);
+  cachedShopifyToken = String(json.access_token);
+  cachedShopifyTokenExpiresAt = now + Math.max(expiresIn, 60) * 1000;
+
+  return cachedShopifyToken;
+}
+
 async function shopifyFetch(path, options = {}) {
+  const token = await getShopifyAccessToken();
+
   const resp = await fetch(`${SHOPIFY_ADMIN_API}${path}`, {
     ...options,
     headers: {
-      "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+      "X-Shopify-Access-Token": token,
       "Content-Type": "application/json",
       ...(options.headers || {})
     }
@@ -68,8 +123,8 @@ export default async function handler(req, res) {
       return res.status(200).json(WOO_SUCCESS);
     }
 
-    if (!SHOPIFY_STORE || !SHOPIFY_ADMIN_API || !SHOPIFY_TOKEN) {
-      console.error("[wooacry-shipping-webhook] Missing Shopify admin env vars");
+    if (!SHOPIFY_STORE || !SHOPIFY_ADMIN_API || !SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET) {
+      console.error("[wooacry-shipping-webhook] Missing Shopify client credential env vars");
       return res.status(200).json(WOO_SUCCESS);
     }
 
@@ -194,9 +249,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // Optional: store Wooacry status/traces later if you decide to persist to order metafields.
-    // The docs expose shipping_status and traces in the webhook body.
-    // shipping_status values include 1, 2, 10, 15, 20, 25, 30, 35, 40, 45, 50.
     void shippingStatus;
     void traces;
 
