@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import {
   WOOACRY_RESELLER_FLAG,
   WOOACRY_EDITOR_BASE,
@@ -44,15 +45,6 @@ function normalizeEmail(x) {
   return s ? s.toLowerCase() : "";
 }
 
-/**
- * third_party_user must be stable.
- * Best options:
- * - your internal user id
- * - customer email
- * - Shopify customer id
- *
- * Do not fall back to IP/user-agent hashes for production order flows.
- */
 function getThirdPartyUser(req) {
   const explicit =
     req.query.third_party_user ||
@@ -75,7 +67,15 @@ function getThirdPartyUser(req) {
     return `customer_${cleanUserId(shopifyCustomerId)}`;
   }
 
-  throw new Error("Missing stable user identifier for third_party_user");
+  // Guest fallback for storefront visitors who are not logged in
+  const variantId = String(req.query.variant_id || "").trim();
+  const productId = String(req.query.product_id || "").trim();
+  const ua = String(req.headers["user-agent"] || "unknown").trim();
+
+  const raw = `${productId}|${variantId}|${ua}`;
+  const hash = crypto.createHash("sha256").update(raw).digest("hex").slice(0, 16);
+
+  return `guest_${hash}`;
 }
 
 function buildCallbackUrl(baseUrl, product_id, variant_id) {
