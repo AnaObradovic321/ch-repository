@@ -1,17 +1,17 @@
-const SHOPIFY_STORE = process.env.SHOPIFY_STORE_HANDLE || "characterhub-merch-store";
-const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-01";
-const SHOPIFY_ADMIN_API = `https://${SHOPIFY_STORE}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`;
-const SHOPIFY_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
+const SHOPIFY_STORE =
+  process.env.SHOPIFY_STORE_HANDLE ||
+  process.env.SHOPIFY_SHOP_HANDLE ||
+  "";
 
-const WOOACRY_WEBHOOK_SECRET = process.env.WOOACRY_WEBHOOK_SECRET;
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-01";
+const SHOPIFY_ADMIN_API = SHOPIFY_STORE
+  ? `https://${SHOPIFY_STORE}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`
+  : "";
+
+const SHOPIFY_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN || process.env.SHOPIFY_TOKEN || "";
+const WOOACRY_WEBHOOK_SECRET = process.env.WOOACRY_WEBHOOK_SECRET || "";
 
 const WOO_SUCCESS = { data: [], code: 0, message: "success" };
-
-// If you want Wooacry to treat failures as failures while still returning 200,
-// you can flip this to a non-zero code. Default keeps it simple.
-function wooError(message, code = 0) {
-  return { data: [], code, message: message || "success" };
-}
 
 async function shopifyFetch(path, options = {}) {
   const resp = await fetch(`${SHOPIFY_ADMIN_API}${path}`, {
@@ -25,10 +25,11 @@ async function shopifyFetch(path, options = {}) {
 
   const text = await resp.text();
   let json = null;
+
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
-    // ignore non-json
+    json = null;
   }
 
   if (!resp.ok) {
@@ -44,6 +45,7 @@ async function shopifyFetch(path, options = {}) {
 function normalizeWooacryBody(req) {
   if (!req.body) return {};
   if (typeof req.body === "object") return req.body;
+
   try {
     return JSON.parse(req.body);
   } catch {
@@ -51,21 +53,29 @@ function normalizeWooacryBody(req) {
   }
 }
 
+function getProvidedWebhookSecret(req) {
+  return (
+    req.headers["x-wooacry-secret"] ||
+    req.headers["x-webhook-secret"] ||
+    req.query.secret ||
+    ""
+  );
+}
+
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") return res.status(200).json(WOO_SUCCESS);
-    if (!SHOPIFY_TOKEN) {
-      console.error("[wooacry-shipping-webhook] Missing SHOPIFY_ADMIN_API_TOKEN");
+    if (req.method !== "POST") {
+      return res.status(200).json(WOO_SUCCESS);
+    }
+
+    if (!SHOPIFY_STORE || !SHOPIFY_ADMIN_API || !SHOPIFY_TOKEN) {
+      console.error("[wooacry-shipping-webhook] Missing Shopify admin env vars");
       return res.status(200).json(WOO_SUCCESS);
     }
 
     if (WOOACRY_WEBHOOK_SECRET) {
-      const provided =
-        req.headers["x-wooacry-secret"] ||
-        req.headers["x-webhook-secret"] ||
-        req.query.secret;
-
-      if (String(provided || "") !== String(WOOACRY_WEBHOOK_SECRET)) {
+      const provided = String(getProvidedWebhookSecret(req)).trim();
+      if (!provided || provided !== String(WOOACRY_WEBHOOK_SECRET).trim()) {
         console.error("[wooacry-shipping-webhook] Unauthorized: bad secret");
         return res.status(200).json(WOO_SUCCESS);
       }
@@ -79,8 +89,6 @@ export default async function handler(req, res) {
       return res.status(200).json(WOO_SUCCESS);
     }
 
-    // IMPORTANT: You set third_party_order_sn = Shopify order.id during order creation.
-    // So use it directly and do not regex-extract digits.
     const orderId = String(thirdPartyOrderSn).trim();
     if (!/^\d+$/.test(orderId)) {
       console.error("[wooacry-shipping-webhook] third_party_order_sn is not a numeric Shopify order id", {
@@ -97,13 +105,12 @@ export default async function handler(req, res) {
       "Carrier";
 
     const shippingStatus = Number(express?.shipping_status || 0);
+    const traces = Array.isArray(express?.traces) ? express.traces : [];
 
     const trackingUrl = trackingNumber
       ? `https://t.17track.net/en#nums=${encodeURIComponent(trackingNumber)}`
       : "";
 
-    // Gate fulfillment creation:
-    // Only create a fulfillment when we have tracking OR status indicates picked up/in transit.
     const canCreateFulfillment = Boolean(trackingNumber) || shippingStatus >= 10;
 
     const orderData = await shopifyFetch(`/orders/${orderId}.json`);
@@ -141,7 +148,6 @@ export default async function handler(req, res) {
       }))
     }));
 
-    // If there's no fulfillment yet and we don't have enough signal that it's shipped, do nothing.
     if (!existingFulfillment && !canCreateFulfillment) {
       return res.status(200).json(WOO_SUCCESS);
     }
@@ -165,28 +171,38 @@ export default async function handler(req, res) {
         method: "POST",
         body: JSON.stringify(payload)
       });
+    } else {
+      const existingTrackingNumber = String(existingFulfillment?.tracking_number || "").trim();
+      const existingTrackingCompany = String(existingFulfillment?.tracking_company || "").trim();
 
-      return res.status(200).json(WOO_SUCCESS);
+      const trackingChanged =
+        trackingNumber !== existingTrackingNumber ||
+        trackingCompany !== existingTrackingCompany;
+
+      if (trackingChanged) {
+        const updatePayload = {
+          fulfillment: {
+            notify_customer: false,
+            tracking_info
+          }
+        };
+
+        await shopifyFetch(`/fulfillments/${existingFulfillment.id}.json`, {
+          method: "PUT",
+          body: JSON.stringify(updatePayload)
+        });
+      }
     }
 
-    // Update existing fulfillment tracking.
-    // Avoid spamming customer emails on repeated webhook updates.
-    const updatePayload = {
-      fulfillment: {
-        notify_customer: false,
-        tracking_info
-      }
-    };
-
-    await shopifyFetch(`/fulfillments/${existingFulfillment.id}.json`, {
-      method: "PUT",
-      body: JSON.stringify(updatePayload)
-    });
+    // Optional: store Wooacry status/traces later if you decide to persist to order metafields.
+    // The docs expose shipping_status and traces in the webhook body.
+    // shipping_status values include 1, 2, 10, 15, 20, 25, 30, 35, 40, 45, 50.
+    void shippingStatus;
+    void traces;
 
     return res.status(200).json(WOO_SUCCESS);
   } catch (err) {
     console.error("[wooacry-shipping-webhook ERROR]", err);
-    // Keep Wooacry response format to avoid breaking webhook expectations.
     return res.status(200).json(WOO_SUCCESS);
   }
 }
