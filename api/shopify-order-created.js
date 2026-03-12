@@ -15,15 +15,17 @@ export const config = {
 
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE_HANDLE || process.env.SHOPIFY_SHOP_HANDLE || "";
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-01";
-const SHOPIFY_ADMIN_API_TOKEN =
-  process.env.SHOPIFY_ADMIN_API_TOKEN || process.env.SHOPIFY_TOKEN || "";
-const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET || "";
+const SHOPIFY_CLIENT_ID = process.env.SHOPIFY_CLIENT_ID || "";
+const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET || "";
 
 const SHOPIFY_ADMIN_API = SHOPIFY_STORE
   ? `https://${SHOPIFY_STORE}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}`
   : "";
 
 const WOOACRY_DRY_RUN = String(process.env.WOOACRY_DRY_RUN || "").trim() === "1";
+
+let cachedShopifyToken = "";
+let cachedShopifyTokenExpiresAt = 0;
 
 function asString(x) {
   if (x === null || x === undefined) return "";
@@ -43,18 +45,96 @@ async function readRawBody(req) {
 }
 
 function verifyShopifyWebhook(rawBody, hmacHeader) {
-  if (!SHOPIFY_WEBHOOK_SECRET) {
-    throw new Error("Missing SHOPIFY_WEBHOOK_SECRET env var");
+  if (!SHOPIFY_CLIENT_SECRET) {
+    throw new Error("Missing SHOPIFY_CLIENT_SECRET env var");
   }
 
   if (!hmacHeader || !rawBody) return false;
 
   const digest = crypto
-    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
+    .createHmac("sha256", SHOPIFY_CLIENT_SECRET)
     .update(rawBody, "utf8")
     .digest("base64");
 
   return safeCompare(digest, String(hmacHeader));
+}
+
+async function getShopifyAccessToken() {
+  if (!SHOPIFY_STORE || !SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET) {
+    throw new Error("Missing Shopify client credential env vars");
+  }
+
+  const now = Date.now();
+
+  if (cachedShopifyToken && cachedShopifyTokenExpiresAt > now + 60 * 1000) {
+    return cachedShopifyToken;
+  }
+
+  const body = new URLSearchParams();
+  body.set("grant_type", "client_credentials");
+  body.set("client_id", SHOPIFY_CLIENT_ID);
+  body.set("client_secret", SHOPIFY_CLIENT_SECRET);
+
+  const resp = await fetch(`https://${SHOPIFY_STORE}.myshopify.com/admin/oauth/access_token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "application/json"
+    },
+    body: body.toString()
+  });
+
+  const text = await resp.text();
+  let json = null;
+
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  if (!resp.ok || !json?.access_token) {
+    throw new Error(
+      `Failed to fetch Shopify access token (${resp.status}): ${text || resp.statusText}`
+    );
+  }
+
+  const expiresIn = Number(json.expires_in || 0);
+  cachedShopifyToken = String(json.access_token);
+  cachedShopifyTokenExpiresAt = now + Math.max(expiresIn, 60) * 1000;
+
+  return cachedShopifyToken;
+}
+
+async function shopifyFetch(path, options = {}) {
+  const token = await getShopifyAccessToken();
+
+  const resp = await fetch(`${SHOPIFY_ADMIN_API}${path}`, {
+    ...options,
+    headers: {
+      "X-Shopify-Access-Token": token,
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+
+  const text = await resp.text();
+  let json = null;
+
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  if (!resp.ok) {
+    const err = new Error(`Shopify API error ${resp.status} on ${path}: ${text || resp.statusText}`);
+    err.status = resp.status;
+    err.details = json || text;
+    throw err;
+  }
+
+  return json;
 }
 
 function getLineItemProperty(lineItem, key) {
@@ -160,21 +240,14 @@ async function wooacryCreateOrder({
 }
 
 async function listOrderMetafields(orderId) {
-  if (!SHOPIFY_ADMIN_API_TOKEN || !SHOPIFY_ADMIN_API) return [];
+  if (!SHOPIFY_ADMIN_API) return [];
 
-  const resp = await fetch(`${SHOPIFY_ADMIN_API}/orders/${orderId}/metafields.json`, {
-    headers: {
-      "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
-      "Content-Type": "application/json"
-    }
-  });
-
-  const json = await resp.json();
+  const json = await shopifyFetch(`/orders/${orderId}/metafields.json`);
   return json?.metafields || [];
 }
 
 async function upsertOrderMetafield(orderId, namespace, key, value, type) {
-  if (!SHOPIFY_ADMIN_API_TOKEN || !SHOPIFY_ADMIN_API) return null;
+  if (!SHOPIFY_ADMIN_API) return null;
 
   const all = await listOrderMetafields(orderId);
   const existing = all.find((m) => m.namespace === namespace && m.key === key);
@@ -188,16 +261,11 @@ async function upsertOrderMetafield(orderId, namespace, key, value, type) {
       }
     };
 
-    const resp = await fetch(`${SHOPIFY_ADMIN_API}/metafields/${existing.id}.json`, {
+    const json = await shopifyFetch(`/metafields/${existing.id}.json`, {
       method: "PUT",
-      headers: {
-        "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
-        "Content-Type": "application/json"
-      },
       body: JSON.stringify(payload)
     });
 
-    const json = await resp.json();
     return json?.metafield || null;
   }
 
@@ -210,16 +278,11 @@ async function upsertOrderMetafield(orderId, namespace, key, value, type) {
     }
   };
 
-  const resp = await fetch(`${SHOPIFY_ADMIN_API}/orders/${orderId}/metafields.json`, {
+  const json = await shopifyFetch(`/orders/${orderId}/metafields.json`, {
     method: "POST",
-    headers: {
-      "X-Shopify-Access-Token": SHOPIFY_ADMIN_API_TOKEN,
-      "Content-Type": "application/json"
-    },
     body: JSON.stringify(payload)
   });
 
-  const json = await resp.json();
   return json?.metafield || null;
 }
 
@@ -237,9 +300,9 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method Not Allowed" });
     }
 
-    if (!SHOPIFY_STORE || !SHOPIFY_ADMIN_API_TOKEN || !SHOPIFY_ADMIN_API) {
+    if (!SHOPIFY_STORE || !SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET || !SHOPIFY_ADMIN_API) {
       return res.status(500).json({
-        error: "Missing Shopify admin configuration env vars"
+        error: "Missing Shopify client credential configuration env vars"
       });
     }
 
@@ -433,5 +496,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: err?.message || "Unknown error" });
   }
 }
-
-::contentReference[oaicite:1]{index=1}
