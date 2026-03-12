@@ -1,10 +1,17 @@
 import crypto from "crypto";
+import getRawBody from "raw-body";
 import {
   WOOACRY_API_BASE,
   buildSignedJsonRequest,
   normalizeWooacryAddress,
   readWooacryJson
 } from "./wooacry-utils.js";
+
+export const config = {
+  api: {
+    bodyParser: false
+  }
+};
 
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE_HANDLE || process.env.SHOPIFY_SHOP_HANDLE || "";
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-01";
@@ -30,17 +37,21 @@ function safeCompare(a, b) {
   return crypto.timingSafeEqual(abuf, bbuf);
 }
 
-function verifyShopifyWebhook(req) {
+async function readRawBody(req) {
+  const raw = await getRawBody(req);
+  return raw.toString("utf8");
+}
+
+function verifyShopifyWebhook(rawBody, hmacHeader) {
   if (!SHOPIFY_WEBHOOK_SECRET) {
     throw new Error("Missing SHOPIFY_WEBHOOK_SECRET env var");
   }
 
-  const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-  if (!hmacHeader || !req.rawBody) return false;
+  if (!hmacHeader || !rawBody) return false;
 
   const digest = crypto
     .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-    .update(req.rawBody, "utf8")
+    .update(rawBody, "utf8")
     .digest("base64");
 
   return safeCompare(digest, String(hmacHeader));
@@ -141,10 +152,7 @@ async function wooacryCreateOrder({
     throw new Error(`Wooacry order/create failed: ${JSON.stringify(result).slice(0, 500)}`);
   }
 
-  if (
-    !result?.data?.order_sn ||
-    !Array.isArray(result?.data?.skus)
-  ) {
+  if (!result?.data?.order_sn || !Array.isArray(result?.data?.skus)) {
     throw new Error("Wooacry order/create response missing order_sn or skus");
   }
 
@@ -235,12 +243,19 @@ export default async function handler(req, res) {
       });
     }
 
-    // Requires rawBody support in your webhook setup
-    if (!verifyShopifyWebhook(req)) {
+    const rawBody = await readRawBody(req);
+    const hmacHeader = req.headers["x-shopify-hmac-sha256"];
+
+    if (!verifyShopifyWebhook(rawBody, hmacHeader)) {
       return res.status(401).json({ error: "Invalid Shopify webhook signature" });
     }
 
-    const order = req.body;
+    let order;
+    try {
+      order = JSON.parse(rawBody);
+    } catch {
+      return res.status(400).json({ error: "Invalid JSON payload" });
+    }
 
     if (!order || !order.id) {
       return res.status(400).json({ error: "Invalid Shopify order webhook payload" });
@@ -418,3 +433,5 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: err?.message || "Unknown error" });
   }
 }
+
+::contentReference[oaicite:1]{index=1}
