@@ -1,10 +1,25 @@
-import { WOOACRY_API_BASE, buildHeaders, readWooacryJson } from "./wooacry-utils.js";
+import {
+  WOOACRY_API_BASE,
+  buildSignedJsonRequest,
+  readWooacryJson
+} from "./wooacry-utils.js";
 
 function pickThirdPartyOrderSn(req) {
   if (req.method === "GET") {
-    return req.query.third_party_order_sn || req.query.order_id || req.query.shopify_order_id || null;
+    return (
+      req.query.third_party_order_sn ||
+      req.query.order_id ||
+      req.query.shopify_order_id ||
+      null
+    );
   }
-  return req.body?.third_party_order_sn || req.body?.order_id || req.body?.shopify_order_id || null;
+
+  return (
+    req.body?.third_party_order_sn ||
+    req.body?.order_id ||
+    req.body?.shopify_order_id ||
+    null
+  );
 }
 
 export default async function handler(req, res) {
@@ -14,20 +29,27 @@ export default async function handler(req, res) {
 
   try {
     const third_party_order_sn = pickThirdPartyOrderSn(req);
+
     if (!third_party_order_sn || String(third_party_order_sn).trim() === "") {
-      return res.status(400).json({ error: "Missing third_party_order_sn (or order_id/shopify_order_id)" });
+      return res.status(400).json({
+        error: "Missing third_party_order_sn (or order_id/shopify_order_id)"
+      });
     }
 
-    const bodyObj = { third_party_order_sn: String(third_party_order_sn).trim() };
-    const raw = JSON.stringify(bodyObj);
+    const bodyObj = {
+      third_party_order_sn: String(third_party_order_sn).trim()
+    };
+
+    const { raw, headers } = buildSignedJsonRequest(bodyObj);
 
     const wooResp = await fetch(`${WOOACRY_API_BASE}/api/reseller/open/order/info`, {
       method: "POST",
-      headers: buildHeaders(raw),
+      headers,
       body: raw
     });
 
     const parsed = await readWooacryJson(wooResp);
+
     if (!parsed.ok) {
       return res.status(502).json({
         error: "Wooacry returned non-JSON for order/info",
@@ -36,14 +58,57 @@ export default async function handler(req, res) {
       });
     }
 
+    const result = parsed.json;
+
+    if (!result || typeof result.code === "undefined") {
+      return res.status(502).json({
+        error: "Wooacry returned malformed JSON for order/info",
+        wooacry_http_status: wooResp.status,
+        details: result
+      });
+    }
+
+    if (result.code !== 0) {
+      return res.status(502).json({
+        error: "Wooacry order/info failed",
+        wooacry_http_status: wooResp.status,
+        wooacry_code: result.code,
+        wooacry_message: result.message || null,
+        request: bodyObj,
+        details: result
+      });
+    }
+
+    const data = result.data || {};
+    const returnedSkus = Array.isArray(data.skus) ? data.skus : null;
+
+    if (
+      !data.order_sn ||
+      !Number.isInteger(data.total_amount) ||
+      !Number.isInteger(data.sku_amount) ||
+      !Number.isInteger(data.postal_amount) ||
+      !Number.isInteger(data.tax_amount) ||
+      !Number.isInteger(data.tax_service_amount) ||
+      !returnedSkus
+    ) {
+      return res.status(502).json({
+        error: "Wooacry order/info response missing required data",
+        wooacry_http_status: wooResp.status,
+        request: bodyObj,
+        details: result
+      });
+    }
+
     return res.status(200).json({
-      ok: parsed.json?.code === 0,
+      ok: true,
       wooacry_http_status: wooResp.status,
       request: bodyObj,
-      response: parsed.json
+      response: result
     });
   } catch (err) {
     console.error("[wooacry-order-info ERROR]", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({
+      error: err?.message || "Unknown error"
+    });
   }
 }
